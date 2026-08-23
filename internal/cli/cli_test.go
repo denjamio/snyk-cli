@@ -1,0 +1,748 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	embedded "github.com/denjamio/snyk-cli"
+	"github.com/denjamio/snyk-cli/internal/output"
+)
+
+func newStreams() (Streams, *bytes.Buffer, *bytes.Buffer) {
+	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
+	return Streams{Out: out, Err: errOut, OutIsTTY: false}, out, errOut
+}
+
+func decodeEnvelope(t *testing.T, data []byte) output.Envelope {
+	t.Helper()
+	var env output.Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("invalid envelope JSON: %v\n%s", err, data)
+	}
+	return env
+}
+
+func TestVersion(t *testing.T) {
+	s, out, _ := newStreams()
+	if rc := Run([]string{"version"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if got := strings.TrimSpace(out.String()); got != "snyk "+Version {
+		t.Errorf("out = %q", got)
+	}
+}
+
+func TestHelpText(t *testing.T) {
+	s, out, _ := newStreams()
+	if rc := Run([]string{"help"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	for _, want := range []string{"list", "get", "version", "--org"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("usage missing %q", want)
+		}
+	}
+}
+
+func TestHelpJSONCatalog(t *testing.T) {
+	s, out, _ := newStreams()
+	if rc := Run([]string{"help", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if !env.OK || env.Command != "help" {
+		t.Fatalf("envelope = %+v", env)
+	}
+	data, err := json.Marshal(env.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Commands []commandDoc `json:"commands"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Commands) != 4 {
+		t.Fatalf("commands = %d, want 4", len(parsed.Commands))
+	}
+	var listDoc commandDoc
+	for _, c := range parsed.Commands {
+		if c.Name == "issues list" {
+			listDoc = c
+		}
+	}
+	if len(listDoc.Flags) < 8 {
+		t.Errorf("list flags = %d, want >= 8", len(listDoc.Flags))
+	}
+}
+
+func TestUnknownCommandExit2(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"bogus"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "unknown command") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// clearScopeEnv empties the org/project env vars so host shells exporting
+// them cannot leak into tests that assert flag-validation behavior.
+func clearScopeEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("SNYK_ORG_ID", "")
+	t.Setenv("SNYK_PROJECT_ID", "")
+}
+
+func TestListRequiresOrg(t *testing.T) {
+	clearScopeEnv(t)
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"issues", "list", "--json"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "--org is required") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestListRequiresProject(t *testing.T) {
+	clearScopeEnv(t)
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--json"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "--project is required") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestListNoTokenStructuredErrorWhenPiped(t *testing.T) {
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "")
+	s, out, _ := newStreams()
+	rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--json"}, s)
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if env.OK || env.Command != "issues list" || !strings.Contains(env.Error, "SNYK_TOKEN not set") {
+		t.Fatalf("envelope = %+v", env)
+	}
+}
+
+func TestListNoTokenPlainErrorOnTTY(t *testing.T) {
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "")
+	s, out, errOut := newStreams()
+	s.OutIsTTY = true
+	rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--json"}, s)
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1", rc)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout should be empty on TTY error path, got %q", out.String())
+	}
+	if !strings.HasPrefix(errOut.String(), "error:") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestGetParsesFlagsAfterPositional(t *testing.T) {
+	t.Setenv("SNYK_TOKEN", "")
+	s, out, _ := newStreams()
+	rc := Run([]string{"issues", "get", "c", "--org", "o", "--json"}, s)
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1 (token error, not usage error)", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if !strings.Contains(env.Error, "SNYK_TOKEN not set") {
+		t.Fatalf("expected runtime token error proving --org parsed, got %+v", env)
+	}
+}
+
+func TestGetRequiresExactlyOnePositional(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"issues", "get", "--org", "o"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "exactly one ISSUE_ID") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+	s2, _, _ := newStreams()
+	if rc := Run([]string{"issues", "get", "a", "b", "--org", "o"}, s2); rc != 2 {
+		t.Fatalf("rc = %d, want 2 for two positionals", rc)
+	}
+}
+
+func TestFlagsFirst(t *testing.T) {
+	flags, pos := flagsFirst([]string{"c", "--org", "o", "--json"})
+	if strings.Join(flags, " ") != "--org o --json" || strings.Join(pos, ",") != "c" {
+		t.Errorf("flags=%v pos=%v", flags, pos)
+	}
+
+	flags, pos = flagsFirst([]string{"--status=open,resolved", "id1"})
+	if strings.Join(flags, " ") != "--status=open,resolved" || strings.Join(pos, ",") != "id1" {
+		t.Errorf("flags=%v pos=%v", flags, pos)
+	}
+
+	flags, pos = flagsFirst([]string{"--include-ignored", "--quiet", "x", "y"})
+	if strings.Join(flags, " ") != "--include-ignored --quiet" || strings.Join(pos, ",") != "x,y" {
+		t.Errorf("boolean consumed value? flags=%v pos=%v", flags, pos)
+	}
+
+	flags, pos = flagsFirst([]string{"a", "--", "b", "--json"})
+	if strings.Join(flags, " ") != "" || strings.Join(pos, ",") != "a,b,--json" {
+		t.Errorf("terminator mishandled: flags=%v pos=%v", flags, pos)
+	}
+}
+
+func startMockSnyk(t *testing.T) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	requests := 0
+	mux := http.NewServeMux()
+
+	page1 := func() string {
+		return `{"data":[
+			{"id":"b","attributes":{"key":"k2","title":"B issue","type":"code","effective_severity_level":"high","status":"open","ignored":false,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","description":"desc-b"},"relationships":{"organization":{"data":{"id":"o1"}},"scan_item":{"data":{"id":"p1","type":"project"}}}},
+			{"id":"a","attributes":{"key":"k1","title":"A issue","type":"package_vulnerability","effective_severity_level":"critical","status":"open","ignored":false},"relationships":{"organization":{"data":{"id":"o1"}},"scan_item":{"data":{"id":"p1","type":"project"}}}}
+		],"links":{"next":"` + srv.URL + `/rest/orgs/o/issues?starting_after=1"}}`
+	}
+	page2 := `{"data":[
+		{"id":"c","attributes":{"key":"k3","title":"C issue","type":"cloud","effective_severity_level":"medium","status":"open","ignored":false,"description":"desc-c","coordinates":[{"remedies":[{"type":"manual","description":"Fix it"}]}]},"relationships":{"organization":{"data":{"id":"o1"}},"scan_item":{"data":{"id":"e1","type":"environment"}}}}
+	],"links":{}}`
+	detailC := `{"data":{"id":"c","attributes":{"key":"k3","title":"C detail","type":"cloud","effective_severity_level":"medium","status":"open","ignored":false,"coordinates":[{"remedies":[{"type":"manual","description":"Fix it"}]}]},"relationships":{"organization":{"data":{"id":"o1"}},"scan_item":{"data":{"id":"e1","type":"environment"}}}}}`
+
+	mux.HandleFunc("/rest/orgs/o/issues", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		if requests == 1 {
+			fmtFprint(w, page1())
+			return
+		}
+		fmtFprint(w, page2)
+	})
+	mux.HandleFunc("/rest/orgs/o/issues/c", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmtFprint(w, detailC)
+	})
+
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "test-token")
+	t.Setenv("SNYK_API_URL", srv.URL)
+	return srv
+}
+
+func fmtFprint(w http.ResponseWriter, s string) {
+	_, _ = w.Write([]byte(s))
+}
+
+func TestListQuietOutputsBareGroupsArray(t *testing.T) {
+	startMockSnyk(t)
+	s, out, _ := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1", "--quiet"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	body := out.String()
+	if !strings.HasPrefix(strings.TrimSpace(body), "[") {
+		t.Errorf("quiet output is not a bare array:\n%s", body)
+	}
+	if strings.Contains(body, `"ok"`) {
+		t.Error("quiet output must not contain envelope")
+	}
+	ia := strings.Index(body, `"id": "a-issue"`)
+	ib := strings.Index(body, `"id": "b-issue"`)
+	ic := strings.Index(body, `"id": "c-issue"`)
+	if ia == -1 || ib == -1 || ic == -1 || ia >= ib || ib >= ic {
+		t.Errorf("groups not ordered by name:\n%s", body)
+	}
+}
+
+func TestListEnvelopePipedByDefault(t *testing.T) {
+	startMockSnyk(t)
+	s, out, _ := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if !env.OK || env.Command != "issues list" {
+		t.Fatalf("envelope = %+v", env)
+	}
+	if !strings.Contains(env.Summary, "3 issues · status=open · ignored=false") {
+		t.Errorf("summary = %q", env.Summary)
+	}
+	data, _ := json.Marshal(env.Data)
+	var ld struct {
+		TotalIssues int `json:"total_issues"`
+		Groups      []struct {
+			ID       string `json:"id"`
+			Severity string `json:"severity"`
+			Issues   []struct {
+				ID        string `json:"id"`
+				IssueType string `json:"issue_type"`
+			} `json:"issues"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(data, &ld); err != nil {
+		t.Fatal(err)
+	}
+	if ld.TotalIssues != 3 || len(ld.Groups) != 3 {
+		t.Errorf("data = %s", data)
+	}
+	first := ld.Groups[0]
+	if first.ID != "a-issue" || first.Severity != "critical" || len(first.Issues) != 1 {
+		t.Errorf("first group = %s", data)
+	}
+	if first.Issues[0].ID != "a" || first.Issues[0].IssueType != "package_vulnerability" {
+		t.Errorf("normalization lost: %s", data)
+	}
+}
+
+func TestListHumanTableOnTTY(t *testing.T) {
+	startMockSnyk(t)
+	s, out, _ := newStreams()
+	s.OutIsTTY = true
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	body := out.String()
+	for _, want := range []string{"== A issue", "== B issue", "SEVERITY", "CRITICAL", "HIGH"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("table missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `"ok"`) {
+		t.Error("TTY mode must not emit JSON")
+	}
+}
+
+func TestGetSuccessReturnsNormalizedDetail(t *testing.T) {
+	startMockSnyk(t)
+	s, out, _ := newStreams()
+	if rc := Run([]string{"issues", "get", "c", "--org", "o", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if !env.OK || env.Command != "issues get" || env.Summary != "1 issue" {
+		t.Fatalf("envelope = %+v", env)
+	}
+	data, _ := json.Marshal(env.Data)
+	var item struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		IssueType   string `json:"issue_type"`
+		Remediation *struct {
+			ManualSteps string `json:"manual_steps"`
+		} `json:"remediation"`
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(data, &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.ID != "c" || item.Title != "C detail" || item.IssueType != "cloud" {
+		t.Errorf("item = %s", data)
+	}
+	if item.Remediation == nil || item.Remediation.ManualSteps != "Fix it" {
+		t.Errorf("remediation = %+v", item.Remediation)
+	}
+	if item.ProjectID != "" {
+		t.Errorf("environment scan item should not map to project_id, got %q", item.ProjectID)
+	}
+}
+
+func TestFlagHelpExitsCleanly(t *testing.T) {
+	for _, args := range [][]string{
+		{"issues", "list", "-h"},
+		{"issues", "get", "--help"},
+	} {
+		s, _, _ := newStreams()
+		if rc := Run(args, s); rc != 0 {
+			t.Errorf("Run(%v) rc = %d, want 0", args, rc)
+		}
+	}
+}
+
+func TestSkillPrintOutputsEmbeddedDoc(t *testing.T) {
+	s, out, _ := newStreams()
+	if rc := Run([]string{"skill", "--print"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	body := out.String()
+	if !strings.HasPrefix(body, "---\nname: snyk") || !strings.Contains(body, "# snyk") {
+		t.Errorf("print output is not the embedded SKILL.md:\n%.200s", body)
+	}
+}
+
+func TestSkillPrintRejectsDestination(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"skill", "--print", "--global"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2 for --print with destination", rc)
+	}
+	if !strings.Contains(errOut.String(), "--print cannot be combined") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestSkillRejectsUnknownPositional(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"skill", "uninstall"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "only the optional action") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestSkillInstallExplicitDir(t *testing.T) {
+	dir := t.TempDir()
+	s, out, _ := newStreams()
+	if rc := Run([]string{"skill", "install", "--dir", dir, "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if !env.OK || env.Command != "skill" {
+		t.Fatalf("envelope = %+v", env)
+	}
+	target := filepath.Join(dir, ".agents", "skills", "snyk", "SKILL.md")
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != embedded.SkillMD {
+		t.Error("installed SKILL.md differs from the embedded one")
+	}
+
+	s, out, _ = newStreams()
+	if rc := Run([]string{"skill", "install", "--dir", dir, "--json"}, s); rc != 0 {
+		t.Fatalf("reinstall rc = %d", rc)
+	}
+	env = decodeEnvelope(t, out.Bytes())
+	if !strings.Contains(env.Summary, "already up to date") {
+		t.Errorf("reinstall summary = %q, want idempotent no-op", env.Summary)
+	}
+}
+
+func TestSkillInstallGlobalUsesHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	s, _, _ := newStreams()
+	if rc := Run([]string{"skill", "install", "--global", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	target := filepath.Join(home, ".agents", "skills", "snyk", "SKILL.md")
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("global install missing: %v", err)
+	}
+}
+
+func TestSummarizeReflectsEffectiveFilters(t *testing.T) {
+	cases := []struct {
+		n              int
+		status         string
+		includeIgnored bool
+		severity       string
+		createdAfter   string
+		want           string
+	}{
+		{0, "", false, "", "", "0 issues · status=open · ignored=false · type=code"},
+		{7, "open,resolved", true, "", "", "7 issues · status=open,resolved · ignored=any · type=code"},
+		{5, "", false, "low", "", "5 issues · status=open · ignored=false · type=code · severity=low"},
+		{2, "", false, "", "2026-08-01T00:00:00Z", "2 issues · status=open · ignored=false · type=code · created_after=2026-08-01T00:00:00Z"},
+	}
+	for _, c := range cases {
+		if got := summarize(c.n, c.status, c.includeIgnored, c.severity, c.createdAfter); got != c.want {
+			t.Errorf("summarize(%d,%q,%v,%q,%q) = %q, want %q", c.n, c.status, c.includeIgnored, c.severity, c.createdAfter, got, c.want)
+		}
+	}
+}
+
+func TestListCreatedAfterValidatedAndSentToAPI(t *testing.T) {
+	var lastQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		lastQuery = r.URL.Query()
+		fmt.Fprint(w, `{"data":[],"links":{}}`)
+	}))
+	defer srv.Close()
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_API_URL", srv.URL)
+
+	s, _, _ := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if lastQuery.Has("created_after") {
+		t.Errorf("created_after present by default: %q", lastQuery.Get("created_after"))
+	}
+
+	s, _, _ = newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--created-after", "2026-08-01T12:34:56Z"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if got := lastQuery.Get("created_after"); got != "2026-08-01T12:34:56Z" {
+		t.Errorf("created_after param = %q, want verbatim RFC3339 value", got)
+	}
+
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--created-after", "not-a-date"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2 for invalid RFC3339", rc)
+	}
+	if !strings.Contains(errOut.String(), "invalid --created-after") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestListValidatesAndNormalizesListFlags(t *testing.T) {
+	var lastQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		lastQuery = r.URL.Query()
+		fmt.Fprint(w, `{"data":[],"links":{}}`)
+	}))
+	defer srv.Close()
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_API_URL", srv.URL)
+
+	for _, bad := range [][]string{
+		{"--severity", "critcial"},
+		{"--severity", "high,"},
+		{"--status", "bogus"},
+	} {
+		s, _, errOut := newStreams()
+		args := append([]string{"issues", "list", "--org", "o", "--project", "p"}, bad...)
+		if rc := Run(args, s); rc != 2 {
+			t.Fatalf("Run(%v) rc = %d, want 2", bad, rc)
+		}
+		if !strings.Contains(errOut.String(), bad[0]) {
+			t.Errorf("Run(%v) stderr = %q, want mention of %s", bad, errOut.String(), bad[0])
+		}
+	}
+
+	s, _, _ := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--severity", "high, HIGH ,critical,high"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if got := lastQuery.Get("effective_severity_level"); got != "high,critical" {
+		t.Errorf("severity param = %q, want normalized high,critical", got)
+	}
+
+	s, _, _ = newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--status", "Open ,RESOLVED"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if got := lastQuery.Get("status"); got != "open,resolved" {
+		t.Errorf("status param = %q, want normalized open,resolved", got)
+	}
+}
+
+func TestListTypeFlagIsRejected(t *testing.T) {
+	clearScopeEnv(t)
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--type", "code"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2 for removed --type flag", rc)
+	}
+	if !strings.Contains(errOut.String(), "not defined") {
+		t.Errorf("stderr = %q, want unknown-flag error", errOut.String())
+	}
+}
+
+func TestListSeveritySentToAPIOnlyWhenRequested(t *testing.T) {
+	var lastQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		lastQuery = r.URL.Query()
+		fmt.Fprint(w, `{"data":[],"links":{}}`)
+	}))
+	defer srv.Close()
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_API_URL", srv.URL)
+
+	s, _, _ := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if lastQuery.Has("effective_severity_level") {
+		t.Errorf("severity param present by default: %q", lastQuery.Get("effective_severity_level"))
+	}
+
+	s, _, _ = newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--severity", "LOW"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if got := lastQuery.Get("effective_severity_level"); got != "low" {
+		t.Errorf("explicit severity param = %q, want low (verbatim)", got)
+	}
+}
+
+func TestListDefaultsToCodeFilter(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":[],"links":{}}`)
+		if r.URL.Path == "/rest/orgs/o/issues" && gotQuery == nil {
+			gotQuery = r.URL.Query()
+		}
+	}))
+	defer srv.Close()
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_API_URL", srv.URL)
+
+	s, _, _ := newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if gotQuery == nil {
+		t.Fatal("list endpoint was not called")
+	}
+	if got := gotQuery.Get("type"); got != "code" {
+		t.Errorf("type param = %q, want code always (code-only tool)", got)
+	}
+	if got := gotQuery.Get("scan_item.id"); got != "p1" {
+		t.Errorf("scan_item.id param = %q, want p1 (project is required)", got)
+	}
+	if got := gotQuery.Get("scan_item.type"); got != "project" {
+		t.Errorf("scan_item.type param = %q, want project always (project-scoped tool)", got)
+	}
+	if gotQuery.Has("effective_severity_level") {
+		t.Errorf("severity param present by default: %q", gotQuery.Get("effective_severity_level"))
+	}
+}
+
+func TestEnvVarsProvideOrgAndProject(t *testing.T) {
+	var lastPath string
+	var lastQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		lastPath = r.URL.Path
+		lastQuery = r.URL.Query()
+		if strings.Contains(r.URL.Path, "/issues/") {
+			fmt.Fprint(w, `{"data":{"id":"c","attributes":{"key":"k","title":"C","type":"code","effective_severity_level":"low","status":"open","ignored":false}}}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":[],"links":{}}`)
+	}))
+	defer srv.Close()
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_API_URL", srv.URL)
+	t.Setenv("SNYK_ORG_ID", "envorg")
+	t.Setenv("SNYK_PROJECT_ID", "envproj")
+
+	s, _, _ := newStreams()
+	if rc := Run([]string{"issues", "list", "--quiet"}, s); rc != 0 {
+		t.Fatalf("rc = %d with env-only invocation", rc)
+	}
+	if lastPath != "/rest/orgs/envorg/issues" {
+		t.Errorf("org from env not used, path = %q", lastPath)
+	}
+	if got := lastQuery.Get("scan_item.id"); got != "envproj" {
+		t.Errorf("project from env not used, scan_item.id = %q", got)
+	}
+
+	s, _, _ = newStreams()
+	if rc := Run([]string{"issues", "list", "--org", "flagorg", "--project", "flagproj", "--quiet"}, s); rc != 0 {
+		t.Fatalf("rc = %d with flag invocation", rc)
+	}
+	if lastPath != "/rest/orgs/flagorg/issues" {
+		t.Errorf("flag org must win over env, path = %q", lastPath)
+	}
+	if got := lastQuery.Get("scan_item.id"); got != "flagproj" {
+		t.Errorf("flag project must win over env, scan_item.id = %q", got)
+	}
+
+	s, _, _ = newStreams()
+	if rc := Run([]string{"issues", "get", "c", "--quiet"}, s); rc != 0 {
+		t.Fatalf("rc = %d for get with SNYK_ORG_ID only", rc)
+	}
+	if lastPath != "/rest/orgs/envorg/issues/c" {
+		t.Errorf("get did not resolve org from env, path = %q", lastPath)
+	}
+
+	s, _, _ = newStreams()
+	if rc := Run([]string{"issues", "get", "c", "--org", "flagorg", "--quiet"}, s); rc != 0 {
+		t.Fatalf("rc = %d for get with explicit org", rc)
+	}
+	if lastPath != "/rest/orgs/flagorg/issues/c" {
+		t.Errorf("get did not honor explicit org, path = %q", lastPath)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestEmitWriteErrorReturnsOne(t *testing.T) {
+	s := Streams{Out: failingWriter{}, Err: &bytes.Buffer{}, OutIsTTY: false}
+	rc := emit(s, output.ModeJSON, "issues list", "s", map[string]any{}, func(w io.Writer) {})
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1 on write failure", rc)
+	}
+}
+
+func TestRunEmptyArgsUsageError(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run(nil, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "missing command") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestVersionAliases(t *testing.T) {
+	for _, args := range [][]string{{"--version"}, {"-v"}} {
+		s, out, _ := newStreams()
+		if rc := Run(args, s); rc != 0 {
+			t.Fatalf("Run(%v) rc = %d", args, rc)
+		}
+		if !strings.Contains(out.String(), Version) {
+			t.Errorf("out = %q, want version %q", out.String(), Version)
+		}
+	}
+}
+
+func TestFlagMissingValueIsUsageError(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run([]string{"issues", "list", "--severity"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "flag needs an argument") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func FuzzFlagsFirst(f *testing.F) {
+	f.Add("c", "--org")
+	f.Add("--org", "o")
+	f.Add("--status=open,resolved", "id1")
+	f.Add("--include-ignored", "--quiet")
+	f.Add("a", "--")
+	f.Add("--severity", "")
+	f.Fuzz(func(t *testing.T, a, b string) {
+		args := []string{a, b}
+		flags, positional := flagsFirst(args)
+		total := len(flags) + len(positional)
+		hasTerminator := slices.Contains(args, "--")
+		if total > len(args) || (!hasTerminator && total != len(args)) {
+			t.Fatalf("args not conserved: in=%d flags=%d pos=%d", len(args), len(flags), len(positional))
+		}
+	})
+}

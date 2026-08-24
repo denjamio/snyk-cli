@@ -1,0 +1,128 @@
+---
+name: snyk
+description: >
+  Retrieve EXISTING Snyk issues or findings via the snyk CLI (`snyk issues`,
+  repo snyk-cli): list the issues of a project, get full issue detail, or
+  export deterministic structured JSON. Use when the user mentions snyk
+  issues, snyk report, snyk vulnerabilities, or asks to fetch/extract snyk
+  findings for tickets, triage or persistence. Do NOT use for running new
+  scans (snyk test / snyk monitor), Snyk account configuration, or any
+  other security tooling.
+---
+
+# snyk
+
+Read-only CLI over the Snyk REST Issues API: it retrieves the issues you
+already see in the Snyk web UI as deterministic, structured JSON. It never
+scans, mutates or configures anything. Run it as `snyk` from PATH;
+if the command is not found, ask the user to install it — do not build or
+fetch binaries yourself.
+
+## Workflow
+
+1. Resolve the scope: take `<ORG_ID>` and `<PROJECT_ID>` from context or
+   ask the user — never guess. Exporting `SNYK_ORG_ID` and
+   `SNYK_PROJECT_ID` once is enough; explicit flags override them.
+2. List the issues of the project:
+
+   ```bash
+   snyk issues list --org <ORG_ID> --project <PROJECT_ID> --json
+   ```
+
+3. Get full detail (remediation, code flows) for one finding:
+
+   ```bash
+   snyk issues get <ISSUE_ID> --org <ORG_ID> --json
+   ```
+
+## Rules
+
+- Always pass `--json`; never rely on terminal auto-formatting.
+- `snyk issues list` requires `--org` and `--project`; `snyk issues get`
+  requires `--org`. When a
+  flag is omitted it falls back to the `SNYK_ORG_ID` / `SNYK_PROJECT_ID`
+  environment variables; an explicit flag wins. Missing values exit 2
+  (usage error) without calling the API.
+- The tool is code-only and project-scoped: the query is always `type=code`
+  of a single project (`scan_item.id` + `scan_item.type=project`; there is
+  no `--type` flag and no cross-project listing). Defaults apply
+  server-side: only `status=open`, non-ignored issues, across **all
+  severities**.
+- Request resolved/ignored items explicitly when needed: `--status
+  open,resolved`, `--include-ignored`. Narrow severities with `--severity
+  <list>` (e.g. `--severity high,critical`); filter by creation date with
+  `--created-after <RFC3339>` (e.g. `2026-08-01T00:00:00Z`); add data-flow
+  evidence with `--include-code-flows` (heavier payload).
+- Credentials come exclusively from the `SNYK_TOKEN` environment variable:
+  never echo, store or persist it anywhere.
+- Pagination, retries (429/5xx) and API-version pinning are handled inside
+  the binary. Do not paginate manually or re-run in a retry loop; an
+  exit 1 means retries were exhausted or the request was invalid.
+- Use `--quiet` only when the bare groups array is needed for scripting.
+
+## Output envelope
+
+```json
+{"ok": true, "command": "issues list", "summary": "...", "data": {"total_issues": N, "groups": [...]}}
+```
+
+Each group represents one vulnerability type and carries `id` (a
+deterministic slug of the type name — the natural key for matching
+tickets), `severity` (worst in the group) and `issues`; the display name is
+each issue's `title`. Issue fields: `id` (stable identity), `key`, `title`,
+`issue_type`, `severity`, `status`, `ignored`, `org_id`, `project_id`,
+timestamps, `description`, `remediation` (`manual_steps`), `risk_score`,
+`location`, `locations`, `cwes`, plus code-triage signals: `introduced_at`
+(last introduction — age of the finding),
+`last_resolved_at`/`last_resolved_details` (set on an open issue = it
+reappeared after a previous resolution, a regression),
+`fixable_manually`/`fixable_snyk`/`fixable_upstream`, `commit_id` per
+location, `code_flows` (source→sink steps `file/line/column`, only with
+`--include-code-flows` on `list`; `get` always includes them) and
+`code_flows_omitted`. The structure is closed: every key is always present,
+with empty or null values when the API does not return them; use `get` for
+guaranteed detail.
+
+Groups are ordered alphabetically by type name; issues inside a group by
+severity (critical first), then most recent `created_at`, with the unique
+`id` as final tie-break: identical state produces byte-stable output, safe
+for diffing and downstream persistence keyed by `id`.
+
+## Examples
+
+Worst-severity groups, ready for triage:
+
+```bash
+snyk issues list --org "$SNYK_ORG_ID" --project "$SNYK_PROJECT_ID" \
+  --severity high,critical --json | jq -r '.data.groups[] | "\(.severity) \(.id)"'
+```
+
+Re-audit run including resolved and ignored issues:
+
+```bash
+snyk issues list --org "$SNYK_ORG_ID" --project "$SNYK_PROJECT_ID" \
+  --status open,resolved --include-ignored --json > snyk-audit.json
+```
+
+## Failure handling
+
+Exit codes decide the next action:
+
+- `0` → success: parse `data`.
+- `1` → runtime/API error: read the envelope `error` (or stderr) and
+  surface it to the user. Transient HTTP 429/5xx were already retried
+  internally; do not retry blindly.
+- `2` → usage error: fix the invocation (unknown flag value, missing
+  org/project) and retry.
+
+Common issues:
+
+- `SNYK_TOKEN not set` → ask the user to export `SNYK_TOKEN` before
+  retrying.
+- `--org is required (or set SNYK_ORG_ID)` / `--project is required (or
+  set SNYK_PROJECT_ID)` → resolve the ID from context or ask the user;
+  retry with the flag or the env var.
+- `command not found` → the CLI is not installed; ask the user to install
+  it (one-line installers in the repository README).
+- HTTP 404 on `issues get` → the `ISSUE_ID` is wrong or does not belong to
+  this org; re-check the id instead of retrying.

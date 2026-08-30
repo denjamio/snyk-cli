@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	embedded "github.com/denjamio/snyk-cli"
 	"github.com/denjamio/snyk-cli/internal/output"
@@ -35,7 +37,7 @@ func decodeEnvelope(t *testing.T, data []byte) output.Envelope {
 
 func TestVersion(t *testing.T) {
 	s, out, _ := newStreams()
-	if rc := Run([]string{"version"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"version"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if got := strings.TrimSpace(out.String()); got != "snyk "+Version {
@@ -45,7 +47,7 @@ func TestVersion(t *testing.T) {
 
 func TestHelpText(t *testing.T) {
 	s, out, _ := newStreams()
-	if rc := Run([]string{"help"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"help"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	for _, want := range []string{"list", "get", "version", "--org"} {
@@ -57,7 +59,7 @@ func TestHelpText(t *testing.T) {
 
 func TestHelpJSONCatalog(t *testing.T) {
 	s, out, _ := newStreams()
-	if rc := Run([]string{"help", "--json"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"help", "--json"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
@@ -88,9 +90,25 @@ func TestHelpJSONCatalog(t *testing.T) {
 	}
 }
 
+// TestUsageCoversCatalog pins the human usage text to the machine-readable
+// catalog: every flag documented there must appear in `help` output, so the
+// two help surfaces cannot drift apart.
+func TestUsageCoversCatalog(t *testing.T) {
+	var buf bytes.Buffer
+	printUsage(&buf)
+	usage := buf.String()
+	for _, cmd := range catalog() {
+		for _, f := range cmd.Flags {
+			if !strings.Contains(usage, f.Name) {
+				t.Errorf("usage missing %q (command %s)", f.Name, cmd.Name)
+			}
+		}
+	}
+}
+
 func TestUnknownCommandExit2(t *testing.T) {
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"bogus"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"bogus"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	if !strings.Contains(errOut.String(), "unknown command") {
@@ -109,7 +127,7 @@ func clearScopeEnv(t *testing.T) {
 func TestListRequiresOrg(t *testing.T) {
 	clearScopeEnv(t)
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"issues", "list", "--json"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--json"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	if !strings.Contains(errOut.String(), "--org is required") {
@@ -120,7 +138,7 @@ func TestListRequiresOrg(t *testing.T) {
 func TestListRequiresProject(t *testing.T) {
 	clearScopeEnv(t)
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--json"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--json"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	if !strings.Contains(errOut.String(), "--project is required") {
@@ -132,7 +150,7 @@ func TestListNoTokenStructuredErrorWhenPiped(t *testing.T) {
 	clearScopeEnv(t)
 	t.Setenv("SNYK_TOKEN", "")
 	s, out, _ := newStreams()
-	rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--json"}, s)
+	rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--json"}, s)
 	if rc != 1 {
 		t.Fatalf("rc = %d, want 1", rc)
 	}
@@ -147,7 +165,7 @@ func TestListNoTokenPlainErrorOnTTY(t *testing.T) {
 	t.Setenv("SNYK_TOKEN", "")
 	s, out, errOut := newStreams()
 	s.OutIsTTY = true
-	rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--json"}, s)
+	rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--json"}, s)
 	if rc != 1 {
 		t.Fatalf("rc = %d, want 1", rc)
 	}
@@ -162,7 +180,7 @@ func TestListNoTokenPlainErrorOnTTY(t *testing.T) {
 func TestGetParsesFlagsAfterPositional(t *testing.T) {
 	t.Setenv("SNYK_TOKEN", "")
 	s, out, _ := newStreams()
-	rc := Run([]string{"issues", "get", "c", "--org", "o", "--json"}, s)
+	rc := Run(context.Background(), []string{"issues", "get", "c", "--org", "o", "--json"}, s)
 	if rc != 1 {
 		t.Fatalf("rc = %d, want 1 (token error, not usage error)", rc)
 	}
@@ -174,14 +192,14 @@ func TestGetParsesFlagsAfterPositional(t *testing.T) {
 
 func TestGetRequiresExactlyOnePositional(t *testing.T) {
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"issues", "get", "--org", "o"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"issues", "get", "--org", "o"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	if !strings.Contains(errOut.String(), "exactly one ISSUE_ID") {
 		t.Errorf("stderr = %q", errOut.String())
 	}
 	s2, _, _ := newStreams()
-	if rc := Run([]string{"issues", "get", "a", "b", "--org", "o"}, s2); rc != 2 {
+	if rc := Run(context.Background(), []string{"issues", "get", "a", "b", "--org", "o"}, s2); rc != 2 {
 		t.Fatalf("rc = %d, want 2 for two positionals", rc)
 	}
 }
@@ -254,7 +272,7 @@ func fmtFprint(w http.ResponseWriter, s string) {
 func TestListQuietOutputsBareGroupsArray(t *testing.T) {
 	startMockSnyk(t)
 	s, out, _ := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1", "--quiet"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--quiet"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	body := out.String()
@@ -275,7 +293,7 @@ func TestListQuietOutputsBareGroupsArray(t *testing.T) {
 func TestListEnvelopePipedByDefault(t *testing.T) {
 	startMockSnyk(t)
 	s, out, _ := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
@@ -316,7 +334,7 @@ func TestListHumanTableOnTTY(t *testing.T) {
 	startMockSnyk(t)
 	s, out, _ := newStreams()
 	s.OutIsTTY = true
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	body := out.String()
@@ -333,7 +351,7 @@ func TestListHumanTableOnTTY(t *testing.T) {
 func TestGetSuccessReturnsNormalizedDetail(t *testing.T) {
 	startMockSnyk(t)
 	s, out, _ := newStreams()
-	if rc := Run([]string{"issues", "get", "c", "--org", "o", "--json"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "get", "c", "--org", "o", "--json"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
@@ -370,7 +388,7 @@ func TestFlagHelpExitsCleanly(t *testing.T) {
 		{"issues", "get", "--help"},
 	} {
 		s, _, _ := newStreams()
-		if rc := Run(args, s); rc != 0 {
+		if rc := Run(context.Background(), args, s); rc != 0 {
 			t.Errorf("Run(%v) rc = %d, want 0", args, rc)
 		}
 	}
@@ -378,7 +396,7 @@ func TestFlagHelpExitsCleanly(t *testing.T) {
 
 func TestSkillPrintOutputsEmbeddedDoc(t *testing.T) {
 	s, out, _ := newStreams()
-	if rc := Run([]string{"skill", "--print"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"skill", "--print"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	body := out.String()
@@ -389,7 +407,7 @@ func TestSkillPrintOutputsEmbeddedDoc(t *testing.T) {
 
 func TestSkillPrintRejectsDestination(t *testing.T) {
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"skill", "--print", "--global"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"skill", "--print", "--global"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2 for --print with destination", rc)
 	}
 	if !strings.Contains(errOut.String(), "--print cannot be combined") {
@@ -399,7 +417,7 @@ func TestSkillPrintRejectsDestination(t *testing.T) {
 
 func TestSkillRejectsUnknownPositional(t *testing.T) {
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"skill", "uninstall"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"skill", "uninstall"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	if !strings.Contains(errOut.String(), "only the optional action") {
@@ -410,7 +428,7 @@ func TestSkillRejectsUnknownPositional(t *testing.T) {
 func TestSkillInstallExplicitDir(t *testing.T) {
 	dir := t.TempDir()
 	s, out, _ := newStreams()
-	if rc := Run([]string{"skill", "install", "--dir", dir, "--json"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"skill", "install", "--dir", dir, "--json"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
@@ -427,7 +445,7 @@ func TestSkillInstallExplicitDir(t *testing.T) {
 	}
 
 	s, out, _ = newStreams()
-	if rc := Run([]string{"skill", "install", "--dir", dir, "--json"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"skill", "install", "--dir", dir, "--json"}, s); rc != 0 {
 		t.Fatalf("reinstall rc = %d", rc)
 	}
 	env = decodeEnvelope(t, out.Bytes())
@@ -436,12 +454,44 @@ func TestSkillInstallExplicitDir(t *testing.T) {
 	}
 }
 
+// TestSkillInstallReplacesStaleFileAndPermissions exercises the atomic
+// write path: an existing (stale) SKILL.md is replaced wholesale with the
+// embedded content, and the file lands with 0644 permissions.
+func TestSkillInstallReplacesStaleFileAndPermissions(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, ".agents", "skills", "snyk", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ := newStreams()
+	if rc := Run(context.Background(), []string{"skill", "install", "--dir", dir, "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != embedded.SkillMD {
+		t.Error("stale SKILL.md was not replaced with the embedded content")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("perm = %v, want 0644", info.Mode().Perm())
+	}
+}
+
 func TestSkillInstallGlobalUsesHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	s, _, _ := newStreams()
-	if rc := Run([]string{"skill", "install", "--global", "--json"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"skill", "install", "--global", "--json"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	target := filepath.Join(home, ".agents", "skills", "snyk", "SKILL.md")
@@ -484,7 +534,7 @@ func TestListCreatedAfterValidatedAndSentToAPI(t *testing.T) {
 	t.Setenv("SNYK_API_URL", srv.URL)
 
 	s, _, _ := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if lastQuery.Has("created_after") {
@@ -492,7 +542,7 @@ func TestListCreatedAfterValidatedAndSentToAPI(t *testing.T) {
 	}
 
 	s, _, _ = newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--created-after", "2026-08-01T12:34:56Z"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--created-after", "2026-08-01T12:34:56Z"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if got := lastQuery.Get("created_after"); got != "2026-08-01T12:34:56Z" {
@@ -500,7 +550,7 @@ func TestListCreatedAfterValidatedAndSentToAPI(t *testing.T) {
 	}
 
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--created-after", "not-a-date"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--created-after", "not-a-date"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2 for invalid RFC3339", rc)
 	}
 	if !strings.Contains(errOut.String(), "invalid --created-after") {
@@ -527,7 +577,7 @@ func TestListValidatesAndNormalizesListFlags(t *testing.T) {
 	} {
 		s, _, errOut := newStreams()
 		args := append([]string{"issues", "list", "--org", "o", "--project", "p"}, bad...)
-		if rc := Run(args, s); rc != 2 {
+		if rc := Run(context.Background(), args, s); rc != 2 {
 			t.Fatalf("Run(%v) rc = %d, want 2", bad, rc)
 		}
 		if !strings.Contains(errOut.String(), bad[0]) {
@@ -536,7 +586,7 @@ func TestListValidatesAndNormalizesListFlags(t *testing.T) {
 	}
 
 	s, _, _ := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--severity", "high, HIGH ,critical,high"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--severity", "high, HIGH ,critical,high"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if got := lastQuery.Get("effective_severity_level"); got != "high,critical" {
@@ -544,7 +594,7 @@ func TestListValidatesAndNormalizesListFlags(t *testing.T) {
 	}
 
 	s, _, _ = newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--status", "Open ,RESOLVED"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--status", "Open ,RESOLVED"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if got := lastQuery.Get("status"); got != "open,resolved" {
@@ -555,7 +605,7 @@ func TestListValidatesAndNormalizesListFlags(t *testing.T) {
 func TestListTypeFlagIsRejected(t *testing.T) {
 	clearScopeEnv(t)
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--type", "code"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--type", "code"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2 for removed --type flag", rc)
 	}
 	if !strings.Contains(errOut.String(), "not defined") {
@@ -576,7 +626,7 @@ func TestListSeveritySentToAPIOnlyWhenRequested(t *testing.T) {
 	t.Setenv("SNYK_API_URL", srv.URL)
 
 	s, _, _ := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if lastQuery.Has("effective_severity_level") {
@@ -584,7 +634,7 @@ func TestListSeveritySentToAPIOnlyWhenRequested(t *testing.T) {
 	}
 
 	s, _, _ = newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--severity", "LOW"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--quiet", "--severity", "LOW"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if got := lastQuery.Get("effective_severity_level"); got != "low" {
@@ -607,7 +657,7 @@ func TestListDefaultsToCodeFilter(t *testing.T) {
 	t.Setenv("SNYK_API_URL", srv.URL)
 
 	s, _, _ := newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if gotQuery == nil {
@@ -647,7 +697,7 @@ func TestEnvVarsProvideOrgAndProject(t *testing.T) {
 	t.Setenv("SNYK_PROJECT_ID", "envproj")
 
 	s, _, _ := newStreams()
-	if rc := Run([]string{"issues", "list", "--quiet"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--quiet"}, s); rc != 0 {
 		t.Fatalf("rc = %d with env-only invocation", rc)
 	}
 	if lastPath != "/rest/orgs/envorg/issues" {
@@ -658,7 +708,7 @@ func TestEnvVarsProvideOrgAndProject(t *testing.T) {
 	}
 
 	s, _, _ = newStreams()
-	if rc := Run([]string{"issues", "list", "--org", "flagorg", "--project", "flagproj", "--quiet"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "flagorg", "--project", "flagproj", "--quiet"}, s); rc != 0 {
 		t.Fatalf("rc = %d with flag invocation", rc)
 	}
 	if lastPath != "/rest/orgs/flagorg/issues" {
@@ -669,7 +719,7 @@ func TestEnvVarsProvideOrgAndProject(t *testing.T) {
 	}
 
 	s, _, _ = newStreams()
-	if rc := Run([]string{"issues", "get", "c", "--quiet"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "get", "c", "--quiet"}, s); rc != 0 {
 		t.Fatalf("rc = %d for get with SNYK_ORG_ID only", rc)
 	}
 	if lastPath != "/rest/orgs/envorg/issues/c" {
@@ -677,7 +727,7 @@ func TestEnvVarsProvideOrgAndProject(t *testing.T) {
 	}
 
 	s, _, _ = newStreams()
-	if rc := Run([]string{"issues", "get", "c", "--org", "flagorg", "--quiet"}, s); rc != 0 {
+	if rc := Run(context.Background(), []string{"issues", "get", "c", "--org", "flagorg", "--quiet"}, s); rc != 0 {
 		t.Fatalf("rc = %d for get with explicit org", rc)
 	}
 	if lastPath != "/rest/orgs/flagorg/issues/c" {
@@ -699,7 +749,7 @@ func TestEmitWriteErrorReturnsOne(t *testing.T) {
 
 func TestRunEmptyArgsUsageError(t *testing.T) {
 	s, _, errOut := newStreams()
-	if rc := Run(nil, s); rc != 2 {
+	if rc := Run(context.Background(), nil, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	if !strings.Contains(errOut.String(), "missing command") {
@@ -710,7 +760,7 @@ func TestRunEmptyArgsUsageError(t *testing.T) {
 func TestVersionAliases(t *testing.T) {
 	for _, args := range [][]string{{"--version"}, {"-v"}} {
 		s, out, _ := newStreams()
-		if rc := Run(args, s); rc != 0 {
+		if rc := Run(context.Background(), args, s); rc != 0 {
 			t.Fatalf("Run(%v) rc = %d", args, rc)
 		}
 		if !strings.Contains(out.String(), Version) {
@@ -721,7 +771,7 @@ func TestVersionAliases(t *testing.T) {
 
 func TestFlagMissingValueIsUsageError(t *testing.T) {
 	s, _, errOut := newStreams()
-	if rc := Run([]string{"issues", "list", "--severity"}, s); rc != 2 {
+	if rc := Run(context.Background(), []string{"issues", "list", "--severity"}, s); rc != 2 {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	if !strings.Contains(errOut.String(), "flag needs an argument") {
@@ -745,4 +795,57 @@ func FuzzFlagsFirst(f *testing.F) {
 			t.Fatalf("args not conserved: in=%d flags=%d pos=%d", len(args), len(flags), len(positional))
 		}
 	})
+}
+
+func TestHelpRejectsPositional(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run(context.Background(), []string{"help", "issues"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "takes no positional arguments") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestListRejectsPositional(t *testing.T) {
+	clearScopeEnv(t)
+	s, _, errOut := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "stray"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "takes no positional arguments") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// TestRunContextCanceledPropagatesToClient pins the contract that the
+// context handed to Run reaches the API client: a canceled context aborts
+// the call instead of waiting for the (slow) server response.
+func TestRunContextCanceledPropagatesToClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Second)
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("SNYK_API_URL", srv.URL)
+	t.Setenv("SNYK_TOKEN", "t")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s, out, _ := newStreams()
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, []string{"issues", "list", "--org", "o", "--project", "p1", "--json"}, s)
+	}()
+	select {
+	case rc := <-done:
+		if rc != 1 {
+			t.Fatalf("rc = %d, want 1 on canceled context", rc)
+		}
+		if !strings.Contains(out.String(), "context canceled") {
+			t.Errorf("out = %q, want context canceled error", out.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return on canceled context")
+	}
 }

@@ -117,6 +117,8 @@ type Risk struct {
 	} `json:"score,omitempty"`
 }
 
+// Issue is the normalized, closed issue payload the CLI emits: every key is
+// always present, with ""/[] or null values where the API returns no data.
 type Issue struct {
 	ID          string       `json:"id"`
 	Key         string       `json:"key"`
@@ -165,6 +167,8 @@ type IssueGroup struct {
 	Issues   []Issue `json:"issues"`
 }
 
+// ListData is the `issues list` payload: the flat issue count plus the
+// grouped, ordered view.
 type ListData struct {
 	TotalIssues int          `json:"total_issues"`
 	Groups      []IssueGroup `json:"groups"`
@@ -240,6 +244,7 @@ func groupSlug(title string) string {
 	return "unknown"
 }
 
+// NormalizeAll normalizes every raw issue, preserving input order.
 func NormalizeAll(raw []RawIssue) []Issue {
 	items := make([]Issue, 0, len(raw))
 	for _, r := range raw {
@@ -248,6 +253,9 @@ func NormalizeAll(raw []RawIssue) []Issue {
 	return items
 }
 
+// Normalize flattens a RawIssue (Snyk JSON:API shape) into the closed Issue
+// payload: locations, remediation, CWEs, triage signals and code flows are
+// derived from the attributes/relationships in one pass.
 func Normalize(r RawIssue) Issue {
 	a := r.Attributes
 	item := Issue{

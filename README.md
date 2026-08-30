@@ -300,10 +300,6 @@ checksums, draft GitHub release.
 
 Notable changes are documented in [CHANGELOG.md](CHANGELOG.md).
 
-## Roadmap
-
-- Batch detail enrichment with bounded concurrency
-
 ## License
 
 [MIT](LICENSE)

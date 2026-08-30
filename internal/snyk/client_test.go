@@ -1,6 +1,7 @@
 package snyk
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -188,12 +189,12 @@ func TestRetryAfterParsing(t *testing.T) {
 	}
 }
 
-func TestTransientBackoffCap(t *testing.T) {
-	if got := transientBackoff(50); got != 2*time.Second {
-		t.Errorf("transientBackoff(50) = %v, want cap 2s", got)
+func TestTransientRetryDelayCap(t *testing.T) {
+	if got := transientRetryDelay(50); got != 2*time.Second {
+		t.Errorf("transientRetryDelay(50) = %v, want cap 2s", got)
 	}
-	if got := transientBackoff(0); got != 250*time.Millisecond {
-		t.Errorf("transientBackoff(0) = %v, want 250ms", got)
+	if got := transientRetryDelay(0); got != 250*time.Millisecond {
+		t.Errorf("transientRetryDelay(0) = %v, want 250ms", got)
 	}
 }
 
@@ -249,17 +250,15 @@ func TestListMaxPagesGuard(t *testing.T) {
 	}
 }
 
-func TestNewClientBaseURLFromEnv(t *testing.T) {
-	t.Setenv("SNYK_API_URL", "")
-	c := NewClient("tok")
+func TestNewClientBaseURL(t *testing.T) {
+	c := NewClient("tok", "")
 	if c.BaseURL != DefaultBaseURL {
-		t.Errorf("base = %q", c.BaseURL)
+		t.Errorf("empty base = %q, want default %q", c.BaseURL, DefaultBaseURL)
 	}
 	if c.HTTP.Timeout != httpTimeout {
 		t.Errorf("http timeout = %v, want bounded %v", c.HTTP.Timeout, httpTimeout)
 	}
-	t.Setenv("SNYK_API_URL", "http://localhost:1234/")
-	c = NewClient("tok")
+	c = NewClient("tok", "http://localhost:1234/")
 	if c.BaseURL != "http://localhost:1234" {
 		t.Errorf("trailing slash not trimmed: %q", c.BaseURL)
 	}
@@ -299,6 +298,55 @@ func TestGet429ExhaustsRetries(t *testing.T) {
 	}
 }
 
+func TestGetContextCanceledDuringRetrySleep(t *testing.T) {
+	attempts := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Retry-After", "10")
+		w.WriteHeader(http.StatusTooManyRequests)
+		if attempts == 1 {
+			cancel() // abort while the client sits in the retry wait
+		}
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(srv).Get(ctx, "o", "x")
+	if err == nil || !containsAll(err.Error(), "context canceled") {
+		t.Fatalf("err = %v, want context canceled", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (retry wait must abort on cancel)", attempts)
+	}
+}
+
+func TestResponseBodyOverLimitIsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), maxBodyBytes+1))
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(srv).Get(context.Background(), "o", "x")
+	if err == nil || !containsAll(err.Error(), "response body exceeds") {
+		t.Fatalf("err = %v, want over-limit rejection", err)
+	}
+}
+
+func TestResponseBodyReadErrorIsPropagated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "partial")
+		w.(http.Flusher).Flush() // headers + first chunk reach the client
+		panic(http.ErrAbortHandler)
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(srv).Get(context.Background(), "o", "x")
+	if err == nil || !containsAll(err.Error(), "read response body") {
+		t.Fatalf("err = %v, want read error propagated", err)
+	}
+}
+
 func TestListContextCanceledFailsFast(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Second)
@@ -320,6 +368,27 @@ func TestListContextCanceledFailsFast(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("List did not honor canceled context")
+	}
+}
+
+// TestListDoesNotMutateCallerQuery pins that List adds its pagination
+// params to a private copy: the caller's url.Values must come back exactly
+// as it was passed in.
+func TestListDoesNotMutateCallerQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	q := mustQuery(t, ListOptions{ProjectID: "p1"})
+	if _, err := newTestClient(srv).List(context.Background(), "o", q); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := q["version"]; ok {
+		t.Error("List added version to the caller's query")
+	}
+	if _, ok := q["limit"]; ok {
+		t.Error("List added limit to the caller's query")
 	}
 }
 

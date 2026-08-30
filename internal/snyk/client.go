@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,14 +30,19 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-func NewClient(token string) *Client {
-	base := os.Getenv("SNYK_API_URL")
-	if base == "" {
-		base = DefaultBaseURL
+// NewClient returns a client for baseURL. An empty baseURL falls back to
+// DefaultBaseURL; the caller resolves SNYK_API_URL (flag-over-env config
+// lives in the CLI layer, the client takes no environment dependencies).
+func NewClient(token, baseURL string) *Client {
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
 	}
-	return &Client{Token: token, BaseURL: strings.TrimRight(base, "/"), HTTP: &http.Client{Timeout: httpTimeout}}
+	return &Client{Token: token, BaseURL: strings.TrimRight(baseURL, "/"), HTTP: &http.Client{Timeout: httpTimeout}}
 }
 
+// ListOptions describes one issues-list query. Severity/Status are
+// pre-validated comma-separated lists; the tool is code-only and
+// project-scoped by design, so ProjectID is required.
 type ListOptions struct {
 	Severity         string
 	Status           string
@@ -89,10 +93,14 @@ type pageResponse struct {
 	} `json:"meta"`
 }
 
+// List retrieves every page of issues for orgID under query, following the
+// cursor links until exhausted (bounded by MaxPages). The query is copied
+// before pagination params are added, so the caller's value is untouched.
 func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]RawIssue, error) {
-	query.Set("version", APIVersion)
-	query.Set("limit", strconv.Itoa(PageLimit))
-	next := c.BaseURL + "/rest/orgs/" + url.PathEscape(orgID) + "/issues?" + query.Encode()
+	q := cloneValues(query)
+	q.Set("version", APIVersion)
+	q.Set("limit", strconv.Itoa(PageLimit))
+	next := c.BaseURL + "/rest/orgs/" + url.PathEscape(orgID) + "/issues?" + q.Encode()
 	var out []RawIssue
 	for page := 0; next != ""; page++ {
 		if page >= MaxPages {
@@ -107,14 +115,15 @@ func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]Ra
 			return nil, fmt.Errorf("decode list response: %w", err)
 		}
 		out = append(out, p.Data...)
-		next = c.abs(p.Links.Next)
-		if n := c.abs(p.Meta.Links.Next); next == "" {
+		next = c.absoluteURL(p.Links.Next)
+		if n := c.absoluteURL(p.Meta.Links.Next); next == "" {
 			next = n
 		}
 	}
 	return out, nil
 }
 
+// Get retrieves a single issue with code flows always included.
 func (c *Client) Get(ctx context.Context, orgID, issueID string) (*RawIssue, error) {
 	u := c.BaseURL + "/rest/orgs/" + url.PathEscape(orgID) + "/issues/" +
 		url.PathEscape(issueID) + "?version=" + APIVersion + "&include_code_flows=true"
@@ -131,7 +140,9 @@ func (c *Client) Get(ctx context.Context, orgID, issueID string) (*RawIssue, err
 	return &p.Data, nil
 }
 
-func (c *Client) abs(next string) string {
+// absoluteURL resolves a pagination cursor to an absolute URL: absolute
+// links pass through, relative ones are anchored at the base URL.
+func (c *Client) absoluteURL(next string) string {
 	switch {
 	case next == "":
 		return ""
@@ -140,6 +151,16 @@ func (c *Client) abs(next string) string {
 	default:
 		return c.BaseURL + next
 	}
+}
+
+// cloneValues copies a url.Values so List can add pagination params
+// without mutating the caller's query.
+func cloneValues(v url.Values) url.Values {
+	out := make(url.Values, len(v))
+	for k, vs := range v {
+		out[k] = append([]string(nil), vs...)
+	}
+	return out
 }
 
 func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
@@ -155,15 +176,22 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		body, err := readBody(resp)
 		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
 		switch {
 		case resp.StatusCode == http.StatusTooManyRequests && attempt < MaxRetries:
 			lastErr = fmt.Errorf("snyk api: HTTP 429 rate limited")
-			time.Sleep(retryAfter(resp.Header))
+			if err := sleepCtx(ctx, retryAfter(resp.Header)); err != nil {
+				return nil, err
+			}
 		case isTransientStatus(resp.StatusCode) && attempt < MaxRetries:
 			lastErr = fmt.Errorf("snyk api: HTTP %d transient failure", resp.StatusCode)
-			time.Sleep(transientBackoff(attempt))
+			if err := sleepCtx(ctx, transientRetryDelay(attempt)); err != nil {
+				return nil, err
+			}
 		case resp.StatusCode != http.StatusOK:
 			return nil, fmt.Errorf("snyk api %s: HTTP %d: %s", u, resp.StatusCode, bodySnippet(body))
 		default:
@@ -173,13 +201,48 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 	return nil, lastErr
 }
 
+// readBody reads the response body capped at maxBodyBytes. The reader is
+// given one byte more than the cap so an over-long body is detected and
+// rejected instead of silently truncating to malformed JSON.
+func readBody(resp *http.Response) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if len(body) > maxBodyBytes {
+		return nil, fmt.Errorf("response body exceeds %d byte limit", maxBodyBytes)
+	}
+	return body, nil
+}
+
+// sleepCtx waits d, returning early with the context error when ctx is done
+// (e.g. SIGINT), so retry waits never outlive the caller's intent.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 func isTransientStatus(code int) bool {
 	return code == http.StatusBadGateway ||
 		code == http.StatusServiceUnavailable ||
 		code == http.StatusGatewayTimeout
 }
 
-func transientBackoff(attempt int) time.Duration {
+// transientRetryDelay returns the linear backoff (capped at 2s) applied
+// between retries of a transient 5xx failure.
+func transientRetryDelay(attempt int) time.Duration {
 	d := time.Duration(attempt+1) * 250 * time.Millisecond
 	if d > 2*time.Second {
 		d = 2 * time.Second

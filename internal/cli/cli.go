@@ -137,13 +137,13 @@ func flagsFirst(args []string) ([]string, []string) {
 	return flags, positional
 }
 
-func Run(args []string, s Streams) int {
+func Run(ctx context.Context, args []string, s Streams) int {
 	if len(args) == 0 {
 		return usageError(s, "missing command")
 	}
 	switch args[0] {
 	case "issues":
-		return runIssues(args[1:], s)
+		return runIssues(ctx, args[1:], s)
 	case "skill":
 		return runSkill(args[1:], s)
 	case "help":
@@ -158,35 +158,42 @@ func Run(args []string, s Streams) int {
 
 // runIssues dispatches the issues resource. Future API surfaces (projects,
 // dependencies, ...) plug in as sibling resource dispatchers in Run.
-func runIssues(args []string, s Streams) int {
+func runIssues(ctx context.Context, args []string, s Streams) int {
 	if len(args) == 0 {
 		return usageError(s, "missing issues command (available: list, get)")
 	}
 	switch args[0] {
 	case "list":
-		return runList(args[1:], s)
+		return runList(ctx, args[1:], s)
 	case "get":
-		return runGet(args[1:], s)
+		return runGet(ctx, args[1:], s)
 	default:
 		return usageError(s, "unknown issues command: "+args[0])
 	}
 }
 
 func runHelp(args []string, s Streams) int {
-	for _, a := range args {
-		if a == "--json" {
-			if err := output.WriteJSON(s.Out, output.Envelope{
-				OK:      true,
-				Command: "help",
-				Data:    map[string]any{"commands": catalog()},
-			}); err != nil {
-				fmt.Fprintln(s.Err, "error:", err)
-				return 1
-			}
-			return 0
-		}
+	fs := newFlagSet("help")
+	jsonFlag := fs.Bool("json", false, "print the machine-readable command catalog")
+	flagArgs, positional := flagsFirst(args)
+	if code, ok := parseFS(fs, flagArgs, s); !ok {
+		return code
 	}
-	printUsage(s.Out)
+	if len(positional) > 0 {
+		return usageError(s, fmt.Sprintf("unexpected argument %q; help takes no positional arguments", positional[0]))
+	}
+	if !*jsonFlag {
+		printUsage(s.Out)
+		return 0
+	}
+	if err := output.WriteJSON(s.Out, output.Envelope{
+		OK:      true,
+		Command: "help",
+		Data:    map[string]any{"commands": catalog()},
+	}); err != nil {
+		fmt.Fprintln(s.Err, "error:", err)
+		return 1
+	}
 	return 0
 }
 
@@ -199,7 +206,7 @@ func resolveSetting(flagValue, envKey string) string {
 	return os.Getenv(envKey)
 }
 
-func runList(args []string, s Streams) int {
+func runList(ctx context.Context, args []string, s Streams) int {
 	fs := newFlagSet("issues list")
 	orgFlag := fs.String("org", "", "Snyk organization ID (required; or env SNYK_ORG_ID)")
 	projectFlag := fs.String("project", "", "Project ID (required; or env SNYK_PROJECT_ID)")
@@ -210,8 +217,12 @@ func runList(args []string, s Streams) int {
 	includeCodeFlows := fs.Bool("include-code-flows", false, "include data flows (source to sink) for code issues; heavier payload")
 	jsonFlag := fs.Bool("json", false, "force JSON envelope output")
 	quietFlag := fs.Bool("quiet", false, "print data only, no envelope")
-	if code, ok := parse(fs, args, s); !ok {
+	flagArgs, positional := flagsFirst(args)
+	if code, ok := parseFS(fs, flagArgs, s); !ok {
 		return code
+	}
+	if len(positional) > 0 {
+		return usageError(s, fmt.Sprintf("unexpected argument %q; issues list takes no positional arguments", positional[0]))
 	}
 	org := resolveSetting(*orgFlag, "SNYK_ORG_ID")
 	if org == "" {
@@ -238,7 +249,7 @@ func runList(args []string, s Streams) int {
 	if token == "" {
 		return runtimeError(s, "issues list", "SNYK_TOKEN not set")
 	}
-	client := snyk.NewClient(token)
+	client := snyk.NewClient(token, os.Getenv("SNYK_API_URL"))
 	query, err := snyk.BuildListQuery(snyk.ListOptions{
 		Severity:         strings.Join(sevToks, ","),
 		Status:           strings.Join(statusToks, ","),
@@ -250,7 +261,7 @@ func runList(args []string, s Streams) int {
 	if err != nil {
 		return runtimeError(s, "issues list", err.Error())
 	}
-	raw, err := client.List(context.Background(), org, query)
+	raw, err := client.List(ctx, org, query)
 	if err != nil {
 		return runtimeError(s, "issues list", err.Error())
 	}
@@ -293,7 +304,7 @@ func normalizeList(value string, allowed []string, flag string) ([]string, error
 	return out, nil
 }
 
-func runGet(args []string, s Streams) int {
+func runGet(ctx context.Context, args []string, s Streams) int {
 	fs := newFlagSet("issues get")
 	orgFlag := fs.String("org", "", "Snyk organization ID (required; or env SNYK_ORG_ID)")
 	jsonFlag := fs.Bool("json", false, "force JSON envelope output")
@@ -313,8 +324,8 @@ func runGet(args []string, s Streams) int {
 	if token == "" {
 		return runtimeError(s, "issues get", "SNYK_TOKEN not set")
 	}
-	client := snyk.NewClient(token)
-	raw, err := client.Get(context.Background(), org, positional[0])
+	client := snyk.NewClient(token, os.Getenv("SNYK_API_URL"))
+	raw, err := client.Get(ctx, org, positional[0])
 	if err != nil {
 		return runtimeError(s, "issues get", err.Error())
 	}
@@ -375,7 +386,7 @@ func runSkill(args []string, s Streams) int {
 	action := "installed"
 	if prev, err := os.ReadFile(target); err == nil && string(prev) == embedded.SkillMD {
 		action = "already up to date"
-	} else if err := os.WriteFile(target, []byte(embedded.SkillMD), 0o644); err != nil {
+	} else if err := writeFileAtomic(target, []byte(embedded.SkillMD), 0o644); err != nil {
 		return runtimeError(s, "skill", err.Error())
 	}
 	summary := fmt.Sprintf("skill %s at %s", action, target)
@@ -385,9 +396,27 @@ func runSkill(args []string, s Streams) int {
 	})
 }
 
-func parse(fs *flag.FlagSet, args []string, s Streams) (int, bool) {
-	flagArgs, _ := flagsFirst(args)
-	return parseFS(fs, flagArgs, s)
+// writeFileAtomic writes data to a temp file inside the target directory
+// and renames it into place, so an interrupted install can never leave a
+// truncated SKILL.md behind; the temp file is cleaned up on any failure.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(name, perm); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func parseFS(fs *flag.FlagSet, args []string, s Streams) (int, bool) {
@@ -459,8 +488,13 @@ func newFlagSet(name string) *flag.FlagSet {
 	return flag.NewFlagSet(name, flag.ContinueOnError)
 }
 
+// printUsage renders the human usage text. Flag blocks are generated from
+// the catalog, the same source as `help --json`, so the two help surfaces
+// cannot drift apart; only the conceptual sections (scope, grouping,
+// environment, exit codes) are written by hand.
 func printUsage(w io.Writer) {
-	fmt.Fprint(w, `snyk <resource> [action] [flags]
+	var sb strings.Builder
+	sb.WriteString(`snyk <resource> [action] [flags]
 
 Resources:
   issues    Snyk Code issues (actions: list, get)
@@ -469,21 +503,11 @@ Resources:
   version   Print version
 
 Run "snyk help --json" for the machine-readable command catalog.
-
-issues list flags:
-  --org ID             Snyk organization ID (required; or env SNYK_ORG_ID)
-  --project ID         Project ID (required; or env SNYK_PROJECT_ID);
-                       the query is always scoped to it (scan_item.id +
-                       scan_item.type=project)
-  --severity LIST      info,low,medium,high,critical (default: all severities)
-  --status LIST        open,resolved (comma-separated; default: open)
-  --created-after TS   RFC3339 date-time, e.g. 2026-08-01T00:00:00Z (only issues created after)
-  --include-ignored    Include ignored issues (default filters them out)
-  --include-code-flows Include data flows (source to sink) for code issues;
-                       heavier payload. 'issues get' always includes them.
-  --json               Force JSON envelope output (default when piped)
-  --quiet              Print data only, no envelope
-
+`)
+	for _, c := range catalog() {
+		writeFlagsSection(&sb, c)
+	}
+	sb.WriteString(`
 Scope:
   issues list always queries Snyk Code issues (type=code) of a single
   project (scan_item.id); there is no --type flag and no cross-project
@@ -493,19 +517,6 @@ Grouping:
   issues list groups issues by vulnerability type. Groups are ordered
   alphabetically by type name; issues inside each group by severity, then
   most recent created_at, with the stable id as final tie-break.
-
-issues get flags:
-  --org ID             Snyk organization ID (required; or env SNYK_ORG_ID)
-  ISSUE_ID             Snyk issue UUID (positional argument)
-  --json / --quiet
-
-skill flags:
-  install              Optional action (bare skill also installs)
-  --global             Install to ~/.agents/skills (default: ./.agents/skills
-                       in the current directory)
-  --dir PATH           Install into the given directory instead
-  --print              Print the embedded SKILL.md to stdout
-  --json               Force JSON envelope output
 
 Output modes:
   terminal             Human-readable table
@@ -520,4 +531,27 @@ Environment:
 
 Exit codes: 0 success · 1 runtime error · 2 usage error
 `)
+	fmt.Fprint(w, sb.String())
+}
+
+// writeFlagsSection renders one command's flag table: name column padded to
+// the widest entry, description appended with its default when present.
+func writeFlagsSection(sb *strings.Builder, c commandDoc) {
+	if len(c.Flags) == 0 {
+		return
+	}
+	fmt.Fprintf(sb, "\n%s flags:\n", c.Name)
+	width := 0
+	for _, f := range c.Flags {
+		if l := len(f.Name); l > width {
+			width = l
+		}
+	}
+	for _, f := range c.Flags {
+		desc := f.Description
+		if f.Default != "" {
+			desc += fmt.Sprintf(" (default: %s)", f.Default)
+		}
+		fmt.Fprintf(sb, "  %-*s  %s\n", width, f.Name, desc)
+	}
 }

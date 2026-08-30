@@ -6,6 +6,22 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Cancellation: `SIGINT`/`SIGTERM` cancel in-flight API calls; retry waits
+  abort immediately instead of sleeping through them.
+- API responses larger than 10 MB are rejected with a clear error instead
+  of being silently truncated (which surfaced as a JSON decode error).
+- `help` and `issues list` reject unexpected positional arguments
+  (usage error, exit 2).
+- The API base URL (`SNYK_API_URL`) is resolved in the CLI layer and
+  injected into the client; the client package no longer reads the
+  environment.
+
+### Added
+
+- Fuzz tests for the flag pre-parser and the group slug generator.
+
 ## [0.1.0] - 2026-08-29
 
 ### Added

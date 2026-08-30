@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // ossRichFixture mirrors a package_vulnerability payload. The CLI is
@@ -472,6 +473,33 @@ func FuzzNormalize(f *testing.F) {
 		}
 		if len(out) == 0 {
 			t.Fatal("empty marshaled issue")
+		}
+	})
+}
+
+// FuzzGroupSlug asserts the invariants the payload contract relies on:
+// slugs are non-empty, lowercase, carry no edge or repeated dashes, and
+// keep only letters, digits and single dashes (letters are unicode-wide —
+// e.g. "Ω Omega" slugs to "ω-omega").
+func FuzzGroupSlug(f *testing.F) {
+	for _, s := range []string{"SQL Injection", "", "   ", "a---b", "Ω Omega", "!!!", "CWE-89 & XSS", "-x-", "unknown"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, title string) {
+		slug := groupSlug(title)
+		if slug == "" {
+			t.Fatalf("empty slug for %q", title)
+		}
+		if slug != strings.ToLower(slug) {
+			t.Fatalf("slug %q not lowercase", slug)
+		}
+		if strings.HasPrefix(slug, "-") || strings.HasSuffix(slug, "-") || strings.Contains(slug, "--") {
+			t.Fatalf("slug %q has edge or repeated dashes", slug)
+		}
+		for _, r := range slug {
+			if r != '-' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				t.Fatalf("slug %q has invalid rune %q", slug, r)
+			}
 		}
 	})
 }

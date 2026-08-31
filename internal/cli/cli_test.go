@@ -136,6 +136,22 @@ func TestUsageCoversCatalog(t *testing.T) {
 	}
 }
 
+// The documented default for --status comes from the same constant the
+// query builder and the envelope summary apply, so the three surfaces
+// cannot drift apart.
+func TestStatusDefaultIsShared(t *testing.T) {
+	for _, c := range catalog() {
+		if c.Name != "issues list" {
+			continue
+		}
+		for _, f := range c.Flags {
+			if f.Name == "--status" && f.Default != snyk.DefaultStatus {
+				t.Errorf("--status documented default = %q, want the shared %q", f.Default, snyk.DefaultStatus)
+			}
+		}
+	}
+}
+
 func TestUnknownCommandExit2(t *testing.T) {
 	s, _, errOut := newStreams()
 	if rc := Run(context.Background(), []string{"bogus"}, s); rc != 2 {
@@ -243,12 +259,14 @@ func TestListNoTokenStructuredErrorWhenPiped(t *testing.T) {
 	}
 }
 
+// On a human terminal, without machine-output flags, a runtime error is
+// the plain message on stderr and stdout stays untouched.
 func TestListNoTokenPlainErrorOnTTY(t *testing.T) {
 	clearScopeEnv(t)
 	t.Setenv("SNYK_TOKEN", "")
 	s, out, errOut := newStreams()
 	s.OutIsTTY = true
-	rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", "--json"}, s)
+	rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p"}, s)
 	if rc != 1 {
 		t.Fatalf("rc = %d, want 1", rc)
 	}
@@ -257,6 +275,31 @@ func TestListNoTokenPlainErrorOnTTY(t *testing.T) {
 	}
 	if !strings.HasPrefix(errOut.String(), "error:") {
 		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// Runtime errors mirror usage errors: on a TTY, an explicit --json/--quiet
+// still routes the structured envelope to stdout, so consumers that asked
+// for machine output get it whatever the stream is attached to.
+func TestRuntimeErrorEnvelopeWithJSONOnTTY(t *testing.T) {
+	for _, flag := range []string{"--json", "--quiet", "-json"} {
+		t.Run(flag, func(t *testing.T) {
+			clearScopeEnv(t)
+			t.Setenv("SNYK_TOKEN", "")
+			s, out, errOut := newStreams()
+			s.OutIsTTY = true
+			rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p", flag}, s)
+			if rc != 1 {
+				t.Fatalf("rc = %d, want 1", rc)
+			}
+			env := decodeEnvelope(t, out.Bytes())
+			if env.Error == nil || env.Error.Kind != kindConfig || !strings.Contains(env.Error.Message, "SNYK_TOKEN not set") {
+				t.Fatalf("envelope = %+v, want kind %q", env, kindConfig)
+			}
+			if !strings.HasPrefix(errOut.String(), "error:") {
+				t.Errorf("stderr = %q, want the plain message as well", errOut.String())
+			}
+		})
 	}
 }
 
@@ -713,6 +756,55 @@ func TestSkillInstallGlobalUsesHome(t *testing.T) {
 	target := filepath.Join(home, ".agents", "skills", "snyk", "SKILL.md")
 	if _, err := os.Stat(target); err != nil {
 		t.Fatalf("global install missing: %v", err)
+	}
+}
+
+// where renders "file:line" from the primary location; issues without one
+// get a placeholder dash.
+func TestWhereRendersLocation(t *testing.T) {
+	cases := []struct {
+		name string
+		it   snyk.Issue
+		want string
+	}{
+		{"primary location", snyk.Issue{Location: &snyk.Location{File: "src/auth.js", StartLine: 7}}, "src/auth.js:7"},
+		{"no location", snyk.Issue{}, "-"},
+	}
+	for _, c := range cases {
+		if got := where(c.it); got != c.want {
+			t.Errorf("%s: where = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// truncateLeft keeps the tail so long paths still show the file name.
+func TestTruncateLeftKeepsTheTail(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"short.js", 28, "short.js"},
+		{"src/a/very/deeply/nested/path/to/module/gateway.js:99", 28, "…ath/to/module/gateway.js:99"},
+	}
+	for _, c := range cases {
+		if got := truncateLeft(c.in, c.width); got != c.want {
+			t.Errorf("truncateLeft(%q, %d) = %q, want %q", c.in, c.width, got, c.want)
+		}
+	}
+}
+
+// tableRow projects an issue onto the presentation row: ids shortened,
+// where rendered — output stays decoupled from the domain model.
+func TestTableRowProjectsTheIssue(t *testing.T) {
+	it := snyk.Issue{
+		ID: "abcdefghij", Severity: "high", IssueType: "code", Title: "T", ProjectID: "12345678-abcd",
+		Location: &snyk.Location{File: "src/auth.js", StartLine: 7},
+	}
+	row := tableRow(it)
+	if row.Severity != "high" || row.Type != "code" || row.Title != "T" ||
+		row.Where != "src/auth.js:7" || row.Project != "12345678" || row.ID != "abcdefgh" {
+		t.Errorf("row = %+v", row)
 	}
 }
 

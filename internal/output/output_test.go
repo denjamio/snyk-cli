@@ -5,8 +5,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/denjamio/snyk-cli/internal/snyk"
 )
 
 func TestResolveModePrecedence(t *testing.T) {
@@ -52,14 +50,12 @@ func TestIsTTYNullDeviceIsNotTTY(t *testing.T) {
 }
 
 func TestRenderIssuesTable(t *testing.T) {
-	items := []snyk.Issue{
-		{ID: "2", Severity: "low", IssueType: "code", Title: "Insecure hash", ProjectID: "abc12345-def0",
-			Location: &snyk.Location{File: "src/services/payments/gateway/adapters/stripe/refund.js", StartLine: 99}},
-		{ID: "1", Severity: "critical", IssueType: "code", Title: "RCE via unsafe deserialization", ProjectID: "abc12345-def0",
-			Location: &snyk.Location{File: "src/auth.js", StartLine: 7}},
+	rows := []Row{
+		{Severity: "low", Type: "code", Title: "Insecure hash", Where: "…/stripe/refund.js:99", Project: "abc12345"},
+		{Severity: "critical", Type: "code", Title: "RCE via unsafe deserialization", Where: "src/auth.js:7", Project: "abc12345"},
 	}
 	var buf bytes.Buffer
-	RenderIssuesTable(&buf, items, "2 issues · status=open · ignored=false")
+	RenderIssuesTable(&buf, rows, "2 issues · status=open · ignored=false")
 
 	out := buf.String()
 	for _, want := range []string{
@@ -77,30 +73,34 @@ func TestRenderIssuesTable(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "…") {
-		t.Error("long path should be left-truncated with ellipsis")
-	}
 	if strings.Index(out, "CRITICAL") < strings.Index(out, "LOW") {
 		t.Error("rows must render in the order they are given (sorting is upstream)")
 	}
 }
 
+// Long titles are right-truncated with an ellipsis at render time.
+func TestRenderIssuesTableTruncatesLongTitles(t *testing.T) {
+	rows := []Row{{Severity: "low", Title: strings.Repeat("a", 60)}}
+	var buf bytes.Buffer
+	RenderIssuesTable(&buf, rows, "")
+	if !strings.Contains(buf.String(), strings.Repeat("a", 39)+"…") {
+		t.Errorf("long title not right-truncated:\n%s", buf.String())
+	}
+}
+
 func TestRenderGroupsTable(t *testing.T) {
-	groups := []snyk.IssueGroup{
+	groups := []Group{
 		{
-			ID: "sql-injection", Title: "SQL Injection", Severity: "critical",
-			Issues: []snyk.Issue{
-				{ID: "b22", Severity: "critical", ProjectID: "abc12345-def0",
-					Location: &snyk.Location{File: "src/db.js", StartLine: 10}},
-				{ID: "a11", Severity: "high", ProjectID: "abc12345-def0",
-					Location: &snyk.Location{File: "src/api.js", StartLine: 3}},
+			Title: "SQL Injection", Severity: "critical",
+			Rows: []Row{
+				{Severity: "critical", Where: "src/db.js:10", Project: "abc12345", ID: "b22"},
+				{Severity: "high", Where: "src/api.js:3", Project: "abc12345", ID: "a11"},
 			},
 		},
 		{
-			ID: "weak-hash", Title: "Weak Hash", Severity: "medium",
-			Issues: []snyk.Issue{
-				{ID: "c33", Severity: "medium", ProjectID: "abc12345-def0",
-					Location: &snyk.Location{File: "src/hash.js", StartLine: 22}},
+			Title: "Weak Hash", Severity: "medium",
+			Rows: []Row{
+				{Severity: "medium", Where: "src/hash.js:22", Project: "abc12345", ID: "c33"},
 			},
 		},
 	}
@@ -131,7 +131,7 @@ func TestRenderGroupsTable(t *testing.T) {
 
 func TestWriteEnvelopeShape(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteEnvelope(&buf, "list", "3 issues", snyk.ListData{TotalIssues: 3, Groups: []snyk.IssueGroup{}}); err != nil {
+	if err := WriteEnvelope(&buf, "list", "3 issues", map[string]any{"total_issues": 3}); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -160,37 +160,9 @@ func TestTruncateRight(t *testing.T) {
 	}
 }
 
-func TestTruncateLeftKeepsTheTail(t *testing.T) {
-	cases := []struct {
-		in    string
-		width int
-		want  string
-	}{
-		{"short.js", 28, "short.js"},
-		{"src/a/very/deeply/nested/path/to/module/gateway.js:99", 28, "…ath/to/module/gateway.js:99"},
-	}
-	for _, c := range cases {
-		if got := truncateLeft(c.in, c.width); got != c.want {
-			t.Errorf("truncateLeft(%q, %d) = %q, want %q", c.in, c.width, got, c.want)
-		}
-	}
-}
-
-func TestShortID(t *testing.T) {
-	if got := shortID("abcdefghij"); got != "abcdefgh" {
-		t.Errorf("shortID long = %q", got)
-	}
-	if got := shortID("abc"); got != "abc" {
-		t.Errorf("shortID short = %q", got)
-	}
-	if got := shortID(""); got != "" {
-		t.Errorf("shortID empty = %q", got)
-	}
-}
-
 func TestQuietModeWritesRawDataWithoutEnvelope(t *testing.T) {
 	var buf bytes.Buffer
-	data := []snyk.Issue{{ID: "a"}}
+	data := []map[string]any{{"id": "a"}}
 	if err := WriteJSON(&buf, data); err != nil {
 		t.Fatal(err)
 	}

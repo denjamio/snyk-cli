@@ -195,7 +195,7 @@ func GroupByType(items []Issue) []IssueGroup {
 		if idx, ok := index[name]; ok {
 			g := &groups[idx]
 			g.Issues = append(g.Issues, it)
-			if SeverityRank(it.Severity) > SeverityRank(g.Severity) {
+			if severityRank(it.Severity) > severityRank(g.Severity) {
 				g.Severity = it.Severity
 			}
 			continue
@@ -453,7 +453,7 @@ func collectCWEs(problems []Problem, classes []Class) []string {
 // first (critical before info), then most recent created_at, with the
 // stable id as final tie-break — a total order on any input.
 func issueCompare(a, b Issue) int {
-	if ra, rb := SeverityRank(a.Severity), SeverityRank(b.Severity); ra != rb {
+	if ra, rb := severityRank(a.Severity), severityRank(b.Severity); ra != rb {
 		return rb - ra
 	}
 	if c := compareCreatedDesc(a.CreatedAt, b.CreatedAt); c != 0 {
@@ -494,7 +494,7 @@ func parseTimestamp(s string) (time.Time, bool) {
 
 // SeverityRank maps a severity name to its rank (higher = worse). Unknown
 // values rank as info.
-func SeverityRank(severity string) int {
+func severityRank(severity string) int {
 	switch severity {
 	case "critical":
 		return 4

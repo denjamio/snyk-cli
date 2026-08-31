@@ -7,8 +7,6 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
-
-	"github.com/denjamio/snyk-cli/internal/snyk"
 )
 
 type Mode uint8
@@ -65,29 +63,47 @@ func WriteEnvelope(w io.Writer, command, summary string, data any) error {
 	return WriteJSON(w, Envelope{OK: true, Command: command, Summary: summary, Data: data})
 }
 
-func RenderIssuesTable(w io.Writer, items []snyk.Issue, summary string) {
+// Row is one issue as the tables render it: a presentation-only
+// projection the caller (cli) builds from its domain model, so this
+// package carries no dependency on it.
+type Row struct {
+	Severity string // as returned by the API; rendered uppercase
+	Type     string
+	Title    string
+	Where    string // "file:line", already width-truncated by the caller
+	Project  string // short id
+	ID       string // short id
+}
+
+// Group is one vulnerability-type cluster for the groups table.
+type Group struct {
+	Title    string
+	Severity string
+	Rows     []Row
+}
+
+func RenderIssuesTable(w io.Writer, rows []Row, summary string) {
 	fmt.Fprintln(w, summary)
 	fmt.Fprintln(w)
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "SEVERITY\tTYPE\tTITLE\tWHERE\tPROJECT")
-	for _, it := range items {
+	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			strings.ToUpper(it.Severity), it.IssueType, truncateRight(it.Title, 40),
-			where(it), shortID(it.ProjectID))
+			severityLabel(r.Severity), r.Type, truncateRight(r.Title, 40), r.Where, r.Project)
 	}
 	_ = tw.Flush()
 }
 
-func RenderGroupsTable(w io.Writer, groups []snyk.IssueGroup, summary string) {
+func RenderGroupsTable(w io.Writer, groups []Group, summary string) {
 	fmt.Fprintln(w, summary)
 	fmt.Fprintln(w)
 	for _, g := range groups {
-		fmt.Fprintf(w, "== %s · %d issues · %s\n", g.Title, len(g.Issues), severityLabel(g.Severity))
+		fmt.Fprintf(w, "== %s · %d issues · %s\n", g.Title, len(g.Rows), severityLabel(g.Severity))
 		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "  SEVERITY\tWHERE\tPROJECT\tID")
-		for _, it := range g.Issues {
+		for _, r := range g.Rows {
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
-				severityLabel(it.Severity), where(it), shortID(it.ProjectID), shortID(it.ID))
+				severityLabel(r.Severity), r.Where, r.Project, r.ID)
 		}
 		_ = tw.Flush()
 		fmt.Fprintln(w)
@@ -101,25 +117,6 @@ func severityLabel(severity string) string {
 	return strings.ToUpper(severity)
 }
 
-func where(it snyk.Issue) string {
-	if it.Location != nil && it.Location.File != "" {
-		return truncateLeft(fmt.Sprintf("%s:%d", it.Location.File, it.Location.StartLine), whereWidth)
-	}
-	return "-"
-}
-
-const whereWidth = 28
-
-// truncateLeft keeps the tail of s (the last width runes, including an
-// ellipsis), so long paths still show the file name next to the line.
-func truncateLeft(s string, width int) string {
-	r := []rune(s)
-	if len(r) <= width {
-		return s
-	}
-	return "…" + string(r[len(r)-width+1:])
-}
-
 // truncateRight keeps the head of s (the first max runes, ending in an
 // ellipsis).
 func truncateRight(s string, max int) string {
@@ -128,11 +125,4 @@ func truncateRight(s string, max int) string {
 		return s
 	}
 	return string(runes[:max-1]) + "…"
-}
-
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
 }

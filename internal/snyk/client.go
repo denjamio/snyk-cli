@@ -23,6 +23,10 @@ const (
 	maxRetryWait     = 120 * time.Second
 	maxBodyBytes     = 10 << 20
 	defaultUserAgent = "snyk-cli"
+	// DefaultStatus is the status filter applied when the caller does not
+	// override it: the query builder, the flag documentation and the
+	// envelope summary all read from this one constant.
+	DefaultStatus = "open"
 )
 
 type Client struct {
@@ -80,7 +84,7 @@ func BuildListQuery(o ListOptions) (url.Values, error) {
 	if o.Status != "" {
 		v.Set("status", o.Status)
 	} else {
-		v.Set("status", "open")
+		v.Set("status", DefaultStatus)
 	}
 	if !o.IncludeIgnored {
 		v.Set("ignored", "false")
@@ -318,10 +322,19 @@ func transientRetryDelay(attempt int) time.Duration {
 	return d
 }
 
+// retryAfter parses the Retry-After header: delta-seconds or HTTP-date
+// (RFC 9110 §10.2.1). Unknown, negative or past values fall back to the
+// 1s default; the result never exceeds maxRetryWait.
 func retryAfter(h http.Header) time.Duration {
 	d := time.Second
-	if n, err := strconv.Atoi(strings.TrimSpace(h.Get("Retry-After"))); err == nil && n >= 0 {
-		d = time.Duration(n) * time.Second
+	if v := strings.TrimSpace(h.Get("Retry-After")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			d = time.Duration(n) * time.Second
+		} else if t, err := http.ParseTime(v); err == nil {
+			if wait := time.Until(t); wait > d {
+				d = wait
+			}
+		}
 	}
 	if d > maxRetryWait {
 		d = maxRetryWait

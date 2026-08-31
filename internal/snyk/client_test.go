@@ -257,6 +257,8 @@ func TestGetFailsAfterExhaustedTransientRetries(t *testing.T) {
 }
 
 func TestRetryAfterParsing(t *testing.T) {
+	// An HTTP-date far enough in the future is capped at maxRetryWait.
+	farFuture := time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)
 	cases := []struct {
 		header string
 		want   time.Duration
@@ -267,6 +269,10 @@ func TestRetryAfterParsing(t *testing.T) {
 		{"-3", time.Second},
 		{"abc", time.Second},
 		{"99999", maxRetryWait},
+		// HTTP-date form (RFC 9110 §10.2.1): past dates fall back to the
+		// 1s default, far-future dates are capped.
+		{farFuture, maxRetryWait},
+		{"Mon, 02 Jan 2006 15:04:05 GMT", time.Second},
 	}
 	for _, c := range cases {
 		h := http.Header{}
@@ -276,6 +282,17 @@ func TestRetryAfterParsing(t *testing.T) {
 		if got := retryAfter(h); got != c.want {
 			t.Errorf("retryAfter(%q) = %v, want %v", c.header, got, c.want)
 		}
+	}
+}
+
+// A near-future HTTP-date inside the cap is honored (up to 1s of slack so
+// the test stays deterministic).
+func TestRetryAfterHTTPDateInsideCap(t *testing.T) {
+	header := time.Now().Add(3 * time.Second).UTC().Format(http.TimeFormat)
+	h := http.Header{}
+	h.Set("Retry-After", header)
+	if got := retryAfter(h); got < 2*time.Second || got > maxRetryWait {
+		t.Errorf("retryAfter(%q) = %v, want a wait in (2s, %v]", header, got, maxRetryWait)
 	}
 }
 

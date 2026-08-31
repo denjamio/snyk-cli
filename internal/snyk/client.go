@@ -151,10 +151,11 @@ func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]Ra
 		if c.Progress != nil {
 			c.Progress(pageEvent(len(p.Data), page+1))
 		}
-		next = c.absoluteURL(p.Links.Next)
-		if n := c.absoluteURL(p.Meta.Links.Next); next == "" {
-			next = n
+		n, err := c.cursor(p.Links.Next, p.Meta.Links.Next)
+		if err != nil {
+			return nil, false, err
 		}
+		next = n
 	}
 	return out, false, nil
 }
@@ -176,17 +177,40 @@ func (c *Client) Get(ctx context.Context, orgID, issueID string) (*RawIssue, err
 	return &p.Data, nil
 }
 
-// absoluteURL resolves a pagination cursor to an absolute URL: absolute
-// links pass through, relative ones are anchored at the base URL.
-func (c *Client) absoluteURL(next string) string {
-	switch {
-	case next == "":
-		return ""
-	case strings.HasPrefix(next, "http://"), strings.HasPrefix(next, "https://"):
-		return next
-	default:
-		return c.BaseURL + next
+// cursor picks the next-page link (the first non-empty one: a top-level
+// absolute link wins over the meta one) and resolves it against the base
+// URL. A cursor pointing outside the base URL — absolute or
+// protocol-relative, any scheme or host mismatch — is refused: following
+// it would send the Authorization token to another host, so it surfaces
+// as a typed api error instead of a silent credential leak.
+func (c *Client) cursor(next ...string) (string, error) {
+	link := ""
+	for _, l := range next {
+		if l != "" {
+			link = l
+			break
+		}
 	}
+	if link == "" {
+		return "", nil
+	}
+	u, err := url.Parse(link)
+	if err != nil {
+		return "", &Error{Kind: KindAPI, err: fmt.Errorf("snyk api: unparseable pagination cursor %q", link)}
+	}
+	if u.Scheme == "" && u.Host == "" {
+		// Relative cursor: anchor it at the base URL, keeping a single
+		// slash between host and path.
+		if !strings.HasPrefix(link, "/") {
+			link = "/" + link
+		}
+		return c.BaseURL + link, nil
+	}
+	base, berr := url.Parse(c.BaseURL)
+	if berr != nil || !strings.EqualFold(u.Scheme, base.Scheme) || !strings.EqualFold(u.Host, base.Host) {
+		return "", &Error{Kind: KindAPI, err: fmt.Errorf("snyk api: pagination cursor %q points outside the API base URL %q; refusing to follow it", link, c.BaseURL)}
+	}
+	return u.String(), nil
 }
 
 // cloneValues copies a url.Values so List can add pagination params

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/denjamio/snyk-cli/internal/output"
@@ -9,7 +10,7 @@ import (
 // runVersion prints the CLI version: plain text for humans, or a JSON
 // envelope with --json so agents read it without parsing prose — the same
 // structured-output rule as every other command.
-func runVersion(args []string, s Streams) int {
+func runVersion(_ context.Context, args []string, s Streams) int {
 	cmd, code := parseCommand(versionSpec, args, s)
 	if cmd == nil {
 		return code
@@ -21,13 +22,9 @@ func runVersion(args []string, s Streams) int {
 		fmt.Fprintln(s.Out, "snyk "+Version)
 		return 0
 	}
-	if err := output.WriteJSON(s.Out, output.Envelope{
+	return writeEnvelope(s, output.Envelope{
 		OK:      true,
 		Command: "version",
 		Data:    map[string]any{"version": Version},
-	}); err != nil {
-		fmt.Fprintln(s.Err, "error:", err)
-		return 1
-	}
-	return 0
+	})
 }

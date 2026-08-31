@@ -2,6 +2,7 @@ package output
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -55,7 +56,9 @@ func TestRenderIssuesTable(t *testing.T) {
 		{Severity: "critical", Type: "code", Title: "RCE via unsafe deserialization", Where: "src/auth.js:7", Project: "abc12345"},
 	}
 	var buf bytes.Buffer
-	RenderIssuesTable(&buf, rows, "2 issues · status=open · ignored=false")
+	if err := RenderIssuesTable(&buf, rows, "2 issues · status=open · ignored=false"); err != nil {
+		t.Fatal(err)
+	}
 
 	out := buf.String()
 	for _, want := range []string{
@@ -82,7 +85,9 @@ func TestRenderIssuesTable(t *testing.T) {
 func TestRenderIssuesTableTruncatesLongTitles(t *testing.T) {
 	rows := []Row{{Severity: "low", Title: strings.Repeat("a", 60)}}
 	var buf bytes.Buffer
-	RenderIssuesTable(&buf, rows, "")
+	if err := RenderIssuesTable(&buf, rows, ""); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(buf.String(), strings.Repeat("a", 39)+"…") {
 		t.Errorf("long title not right-truncated:\n%s", buf.String())
 	}
@@ -105,7 +110,9 @@ func TestRenderGroupsTable(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	RenderGroupsTable(&buf, groups, "3 issues · status=open · ignored=false · type=code")
+	if err := RenderGroupsTable(&buf, groups, "3 issues · status=open · ignored=false · type=code"); err != nil {
+		t.Fatal(err)
+	}
 
 	out := buf.String()
 	for _, want := range []string{
@@ -172,5 +179,45 @@ func TestQuietModeWritesRawDataWithoutEnvelope(t *testing.T) {
 	}
 	if strings.Contains(out, `"ok"`) {
 		t.Error("raw data must not contain envelope")
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) { return 0, errors.New("write failed") }
+
+// failAfterWriter lets the first n writes succeed and then fails, so the
+// error paths past the first line are reachable in tests.
+type failAfterWriter struct {
+	n   int
+	err bool
+}
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	if w.n <= 0 {
+		w.err = true
+		return 0, errors.New("write failed")
+	}
+	w.n--
+	return len(p), nil
+}
+
+// A failing writer surfaces as an error from both renderers: a
+// half-written table must not pass for success, wherever it breaks.
+func TestRenderWriteErrorsAreReturned(t *testing.T) {
+	if err := RenderIssuesTable(failingWriter{}, []Row{{Severity: "low"}}, "s"); err == nil {
+		t.Error("RenderIssuesTable = nil error on a failing writer")
+	}
+	groups := []Group{{Title: "G", Rows: []Row{{Severity: "low"}}}}
+	if err := RenderGroupsTable(failingWriter{}, groups, "s"); err == nil {
+		t.Error("RenderGroupsTable = nil error on a failing writer")
+	}
+	// Deep failures: the group header, the tabwriter flush and the
+	// trailing blank line each surface too.
+	for _, failAt := range []int{1, 2, 3} {
+		w := &failAfterWriter{n: failAt}
+		if err := RenderGroupsTable(w, groups, "s"); err == nil {
+			t.Errorf("RenderGroupsTable = nil error when writes fail after %d bytes", failAt)
+		}
 	}
 }

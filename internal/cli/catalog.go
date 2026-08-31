@@ -53,6 +53,7 @@ func outputFlags() []flagSpec {
 	return []flagSpec{
 		jsonFlag(),
 		{Name: "--quiet", Bool: true, Description: "print data only, no envelope"},
+		{Name: "--compact", Bool: true, Description: "emit JSON without indentation (with --json, --quiet or piped runs)"},
 	}
 }
 
@@ -127,6 +128,22 @@ func catalog() []commandSpec {
 // the following token. Derived from the catalog — plus the implicit
 // -h/--help accepted on every command — so pre-parsing cannot drift from
 // the real flag definitions.
+// valueFlags mirrors booleanFlags for the flags that take a value: it lets
+// the argument pre-parser detect a missing value (`--org --json`) instead
+// of silently binding the following token as the value — the flag package
+// would accept it, and the run would reach the API with a wrong value.
+var valueFlags = func() map[string]bool {
+	m := map[string]bool{}
+	for _, c := range catalog() {
+		for _, f := range c.Flags {
+			if !f.Bool && !f.Positional {
+				m[strings.TrimLeft(f.Name, "-")] = true
+			}
+		}
+	}
+	return m
+}()
+
 var booleanFlags = func() map[string]bool {
 	m := map[string]bool{"help": true, "h": true}
 	for _, c := range catalog() {

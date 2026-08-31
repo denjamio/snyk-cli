@@ -31,8 +31,19 @@ func NewOSStreams() Streams {
 	}
 }
 
-func flagsFirst(args []string) ([]string, []string) {
-	var flags, positional []string
+// flagsFirst pre-splits flags from positional arguments so value flags
+// are accepted after positionals too (`issues get ID --org x`), which
+// flag.FlagSet alone cannot do: it stops at the first non-flag token.
+// This is the deliberate complexity hotspot of the package — any change
+// here must keep FuzzFlagsFirst's argument-conservation invariant and the
+// booleanFlags derivation (which keeps the pre-parser from swallowing a
+// value flag's next token) green.
+//
+// A known value flag followed by a flag-shaped token is rejected as an
+// error instead of being parsed: the flag package would silently bind
+// that token as the value (`--org --json` → org="--json"), sending a
+// wrong value to the API; failing fast turns it into a usage error.
+func flagsFirst(args []string) (flags, positional []string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
@@ -44,14 +55,25 @@ func flagsFirst(args []string) ([]string, []string) {
 			name := strings.TrimLeft(a, "-")
 			hasValue := strings.Contains(a, "=")
 			if !hasValue && !booleanFlags[name] && i+1 < len(args) {
+				next := args[i+1]
+				if valueFlags[name] && isFlagShaped(next) {
+					return nil, nil, fmt.Errorf("flag --%s needs a value; %q looks like another flag", name, next)
+				}
 				i++
-				flags = append(flags, args[i])
+				flags = append(flags, next)
 			}
 			continue
 		}
 		positional = append(positional, a)
 	}
-	return flags, positional
+	return flags, positional, nil
+}
+
+// isFlagShaped reports whether s would be parsed as a flag rather than a
+// value: a leading dash followed by anything (the bare "-" stdin
+// convention stays a value).
+func isFlagShaped(s string) bool {
+	return len(s) > 1 && s[0] == '-'
 }
 
 // boundFlags gives typed access to the flags bound from a command spec.
@@ -112,7 +134,10 @@ type command struct {
 func parseCommand(spec commandSpec, args []string, s Streams) (*command, int) {
 	fs := newFlagSet(spec.Name)
 	f := bind(fs, spec.Flags)
-	flagArgs, positional := flagsFirst(args)
+	flagArgs, positional, err := flagsFirst(args)
+	if err != nil {
+		return nil, usageError(s, args, spec.Name, err.Error())
+	}
 	if code, ok := parseFS(fs, flagArgs, s); !ok {
 		return nil, code
 	}
@@ -128,26 +153,39 @@ func (c *command) rejectPositional(s Streams) int {
 	return usageError(s, c.args, c.spec.Name, fmt.Sprintf("unexpected argument %q; %s takes no positional arguments", c.positional[0], c.spec.Name))
 }
 
+// dispatch maps each top-level command word to its runner. It and the
+// catalog are pinned together by TestDispatchCoversCatalog, so a new
+// catalog command cannot ship without a dispatch entry — and a dispatch
+// entry cannot ship undocumented.
+var dispatch = map[string]func(context.Context, []string, Streams) int{
+	"issues":  runIssues,
+	"skill":   runSkill,
+	"help":    runHelp,
+	"version": runVersion,
+}
+
 func Run(ctx context.Context, args []string, s Streams) int {
 	if len(args) == 0 {
 		return usageError(s, args, "", "missing command")
 	}
+	ctx, cancel, err := withRunTimeout(ctx)
+	if err != nil {
+		return usageError(s, args, args[0], err.Error())
+	}
+	defer cancel()
+	if fn, ok := dispatch[args[0]]; ok {
+		return fn(ctx, args[1:], s)
+	}
 	switch args[0] {
-	case "issues":
-		return runIssues(ctx, args[1:], s)
-	case "skill":
-		return runSkill(args[1:], s)
-	case "help":
-		return runHelp(args[1:], s)
-	case "version", "--version", "-v":
-		return runVersion(args[1:], s)
+	case "--version", "-v":
+		return runVersion(ctx, args[1:], s)
 	default:
 		return usageError(s, args, args[0], "unknown command: "+args[0])
 	}
 }
 
 // runIssues dispatches the issues resource. Future API surfaces (projects,
-// dependencies, ...) plug in as sibling resource dispatchers in Run.
+// dependencies, ...) plug in as sibling resource dispatchers in dispatch.
 func runIssues(ctx context.Context, args []string, s Streams) int {
 	if len(args) == 0 {
 		return usageError(s, args, "issues", "missing issues command (available: list, get)")
@@ -174,14 +212,35 @@ func parseFS(fs *flag.FlagSet, args []string, s Streams) (code int, ok bool) {
 	return 0, true
 }
 
-func emit(s Streams, mode output.Mode, command, summary string, data any, renderHuman func(io.Writer)) int {
+// writeEnvelope marshals a success envelope to stdout: a marshal or
+// write failure prints to stderr and exits 1. The failure envelope in
+// fail keeps its own path — its exit code must not be overridden by a
+// local write error.
+func writeEnvelope(s Streams, env output.Envelope) int {
+	if err := output.WriteJSON(s.Out, env); err != nil {
+		fmt.Fprintln(s.Err, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+// emit routes one successful payload to its consumer: humans on a
+// terminal get renderHuman, everyone else gets JSON — the bare data in
+// quiet mode, the envelope otherwise — indented unless compact is set.
+// A write failure on either path is a runtime error (exit 1): a partial
+// payload must never pass for success.
+func emit(s Streams, mode output.Mode, compact bool, command, summary string, data any, renderHuman func(io.Writer) error) int {
 	useHuman := mode == output.ModeAuto && s.OutIsTTY
 	if !useHuman {
+		writeData, writeEnvelopeJSON := output.WriteJSON, output.WriteEnvelope
+		if compact {
+			writeData, writeEnvelopeJSON = output.WriteCompactJSON, output.WriteCompactEnvelope
+		}
 		var err error
 		if mode == output.ModeQuiet {
-			err = output.WriteJSON(s.Out, data)
+			err = writeData(s.Out, data)
 		} else {
-			err = output.WriteEnvelope(s.Out, command, summary, data)
+			err = writeEnvelopeJSON(s.Out, command, summary, data)
 		}
 		if err != nil {
 			fmt.Fprintln(s.Err, "error:", err)
@@ -189,7 +248,10 @@ func emit(s Streams, mode output.Mode, command, summary string, data any, render
 		}
 		return 0
 	}
-	renderHuman(s.Out)
+	if err := renderHuman(s.Out); err != nil {
+		fmt.Fprintln(s.Err, "error:", err)
+		return 1
+	}
 	return 0
 }
 

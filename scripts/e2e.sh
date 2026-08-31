@@ -7,12 +7,23 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
-python3 scripts/mock_snyk.py &
+MOCKBIN="$(mktemp -d)"
+go build -o "$MOCKBIN/mock-snyk" ./scripts/mocksnyk
+MOCKOUT="$(mktemp)"
+"$MOCKBIN/mock-snyk" >"$MOCKOUT" &
 MOCK=$!
-trap 'kill "$MOCK" 2>/dev/null || true' EXIT
+trap 'kill "$MOCK" 2>/dev/null || true; rm -rf "$MOCKBIN" "$MOCKOUT"' EXIT
+
+ADDR=""
+for _ in $(seq 1 50); do
+  ADDR="$(cat "$MOCKOUT" 2>/dev/null || true)"
+  [ -n "$ADDR" ] && break
+  sleep 0.1
+done
+[ -n "$ADDR" ] || { echo "mock server did not report its listen address" >&2; exit 1; }
 
 export SNYK_TOKEN=fake
-export SNYK_API_URL=http://127.0.0.1:8899
+export SNYK_API_URL="http://$ADDR"
 export SNYK_ORG_ID=o
 export SNYK_PROJECT_ID=p1
 
@@ -80,6 +91,11 @@ echo "$detail" | grep -q '"command": "issues get"' || fail "get envelope wrong"
 qout=$("$BIN" issues list --org o --project p1 --quiet)
 echo "$qout" | grep -q '"id": "c-issue"' || fail "quiet mode wrong"
 [ "${qout:0:1}" = "[" ] || fail "quiet output is not a bare array"
+
+compactout=$("$BIN" issues list --org o --project p1 --json --compact)
+echo "$compactout" | grep -q '"ok":true' || fail "compact envelope must not be indented"
+cqout=$("$BIN" issues list --org o --project p1 --quiet --compact)
+[ "$(printf '%s\n' "$cqout" | wc -l)" -eq 1 ] || fail "quiet+compact output must be a single line"
 
 set +e
 err=$("$BIN" issues get nope --org o --json 2>/dev/null)

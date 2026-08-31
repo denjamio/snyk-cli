@@ -371,24 +371,76 @@ func TestGetRequiresExactlyOnePositional(t *testing.T) {
 }
 
 func TestFlagsFirst(t *testing.T) {
-	flags, pos := flagsFirst([]string{"c", "--org", "o", "--json"})
-	if strings.Join(flags, " ") != "--org o --json" || strings.Join(pos, ",") != "c" {
-		t.Errorf("flags=%v pos=%v", flags, pos)
+	cases := []struct {
+		name  string
+		args  []string
+		flags string
+		pos   string
+	}{
+		{"flags after positional", []string{"c", "--org", "o", "--json"}, "--org o --json", "c"},
+		{"inline value", []string{"--status=open,resolved", "id1"}, "--status=open,resolved", "id1"},
+		{"booleans do not consume", []string{"--include-ignored", "--quiet", "x", "y"}, "--include-ignored --quiet", "x,y"},
+		{"terminator", []string{"a", "--", "b", "--json"}, "", "a,b,--json"},
+		{"value consumed", []string{"--org", "o", "c"}, "--org o", "c"},
+		{"bare dash stays a value", []string{"--dir", "-", "c"}, "--dir -", "c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags, pos, err := flagsFirst(tc.args)
+			if err != nil {
+				t.Fatalf("flagsFirst(%v): %v", tc.args, err)
+			}
+			if got := strings.Join(flags, " "); got != tc.flags {
+				t.Errorf("flags = %q, want %q", got, tc.flags)
+			}
+			if got := strings.Join(pos, ","); got != tc.pos {
+				t.Errorf("pos = %q, want %q", got, tc.pos)
+			}
+		})
+	}
+}
+
+// A known value flag followed by a flag-shaped token is a missing value:
+// rejected here instead of letting the flag package silently bind the
+// token as the value (`--org --json` would otherwise reach the API as
+// org "--json").
+func TestFlagsFirstRejectsMissingValue(t *testing.T) {
+	for _, args := range [][]string{
+		{"--org", "--json"},
+		{"--severity", "--quiet", "x"},
+		{"issues", "get", "--org", "--", "id"},
+	} {
+		_, _, err := flagsFirst(args)
+		if err == nil {
+			t.Errorf("flagsFirst(%v) = nil error, want the missing-value rejection", args)
+			continue
+		}
+		if !strings.Contains(err.Error(), "needs a value") {
+			t.Errorf("flagsFirst(%v) err = %v, want the missing-value message", args, err)
+		}
+	}
+}
+
+// End to end: a value flag whose value looks like another flag is a usage
+// error (exit 2) — not a runtime error from an API call carrying the
+// token as a value.
+func TestMissingFlagValueIsUsageErrorBeforeAPICall(t *testing.T) {
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "")
+	s, _, errOut := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "get", "x", "--org", "--json"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "flag --org needs a value") {
+		t.Errorf("stderr = %q", errOut.String())
 	}
 
-	flags, pos = flagsFirst([]string{"--status=open,resolved", "id1"})
-	if strings.Join(flags, " ") != "--status=open,resolved" || strings.Join(pos, ",") != "id1" {
-		t.Errorf("flags=%v pos=%v", flags, pos)
+	s, _, errOut = newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--project", "p", "--severity", "--json"}, s); rc != 2 {
+		t.Fatalf("severity rc = %d, want 2", rc)
 	}
-
-	flags, pos = flagsFirst([]string{"--include-ignored", "--quiet", "x", "y"})
-	if strings.Join(flags, " ") != "--include-ignored --quiet" || strings.Join(pos, ",") != "x,y" {
-		t.Errorf("boolean consumed value? flags=%v pos=%v", flags, pos)
-	}
-
-	flags, pos = flagsFirst([]string{"a", "--", "b", "--json"})
-	if strings.Join(flags, " ") != "" || strings.Join(pos, ",") != "a,b,--json" {
-		t.Errorf("terminator mishandled: flags=%v pos=%v", flags, pos)
+	if !strings.Contains(errOut.String(), "flag --severity needs a value") {
+		t.Errorf("severity stderr = %q", errOut.String())
 	}
 }
 
@@ -606,6 +658,85 @@ func TestFlagHelpExitsCleanly(t *testing.T) {
 		if rc := Run(context.Background(), args, s); rc != 0 {
 			t.Errorf("Run(%v) rc = %d, want 0", args, rc)
 		}
+	}
+}
+
+func TestGetEnvelopeGolden(t *testing.T) {
+	startMockSnyk(t)
+	s, out, _ := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "get", "c", "--org", "o", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	golden := filepath.Join("testdata", "issues_get_envelope.json")
+	if *updateGolden {
+		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("golden file missing; run with -update: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Errorf("envelope drifted from the golden contract\n--- golden ---\n%s\n--- got ---\n%s", want, out.Bytes())
+	}
+}
+
+// Auth failures carry a region hint: the default base URL serves the EU
+// region, so a valid-shaped token rejected with 401 usually means the
+// org lives behind another regional endpoint.
+func TestAuthErrorCarriesRegionHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"errors":[{"code":"UNAUTHORIZED","detail":"bad token"}]}`)
+	}))
+	defer srv.Close()
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_API_URL", srv.URL)
+
+	s, out, _ := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "get", "x", "--org", "o", "--json"}, s); rc != 1 {
+		t.Fatalf("rc = %d, want 1", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if env.Error == nil || env.Error.Kind != "auth" {
+		t.Fatalf("envelope = %+v, want kind auth", env)
+	}
+	for _, want := range []string{"SNYK_TOKEN", "SNYK_API_URL", snyk.DefaultBaseURL} {
+		if !strings.Contains(env.Error.Message, want) {
+			t.Errorf("message = %q, want the region hint mentioning %q", env.Error.Message, want)
+		}
+	}
+}
+
+// --compact drops the indentation from both JSON output paths (envelope
+// and bare quiet data) without changing their contents.
+func TestCompactDropsIndentation(t *testing.T) {
+	startMockSnyk(t)
+
+	s, out, _ := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--json", "--compact"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	body := out.String()
+	if !strings.HasPrefix(body, `{"ok":true`) {
+		t.Errorf("compact envelope = %.80s, want an unindented single line", body)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if !env.OK || env.Command != "issues list" {
+		t.Fatalf("envelope = %+v", env)
+	}
+
+	s, out, _ = newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--quiet", "--compact"}, s); rc != 0 {
+		t.Fatalf("quiet compact rc = %d", rc)
+	}
+	body = out.String()
+	if !strings.HasPrefix(body, "[") || strings.Count(body, "\n") != 1 {
+		t.Errorf("quiet compact output = %.80s, want a bare single-line array", body)
 	}
 }
 
@@ -1138,9 +1269,53 @@ func (failingWriter) Write(p []byte) (int, error) { return 0, errors.New("write 
 
 func TestEmitWriteErrorReturnsOne(t *testing.T) {
 	s := Streams{Out: failingWriter{}, Err: &bytes.Buffer{}, OutIsTTY: false}
-	rc := emit(s, output.ModeJSON, "issues list", "s", map[string]any{}, func(w io.Writer) {})
+	rc := emit(s, output.ModeJSON, false, "issues list", "s", map[string]any{}, func(w io.Writer) error { return nil })
 	if rc != 1 {
 		t.Fatalf("rc = %d, want 1 on write failure", rc)
+	}
+	rc = emit(s, output.ModeQuiet, true, "issues list", "s", map[string]any{}, func(w io.Writer) error { return nil })
+	if rc != 1 {
+		t.Fatalf("compact rc = %d, want 1 on write failure", rc)
+	}
+}
+
+// Human output is held to the same contract: a failed render is a runtime
+// error (exit 1), never a silent half-written table.
+func TestEmitHumanWriteErrorReturnsOne(t *testing.T) {
+	s := Streams{Out: failingWriter{}, Err: &bytes.Buffer{}, OutIsTTY: true}
+	rc := emit(s, output.ModeAuto, false, "issues list", "s", map[string]any{}, func(w io.Writer) error {
+		return errors.New("write failed")
+	})
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1 on human render failure", rc)
+	}
+	if !strings.Contains(s.Err.(*bytes.Buffer).String(), "write failed") {
+		t.Errorf("stderr = %q, want the render error", s.Err.(*bytes.Buffer).String())
+	}
+}
+
+// The dispatch table and the command catalog are pinned together: every
+// catalog command must be reachable from Run, and every dispatch entry
+// must be documented by the catalog — either side drifting alone breaks
+// `help --json` consumers or leaves a command undiscoverable.
+func TestDispatchCoversCatalog(t *testing.T) {
+	first := func(name string) string { return strings.Fields(name)[0] }
+	for _, c := range catalog() {
+		if _, ok := dispatch[first(c.Name)]; !ok {
+			t.Errorf("catalog command %q: top-level word %q missing from dispatch", c.Name, first(c.Name))
+		}
+	}
+	for word := range dispatch {
+		found := false
+		for _, c := range catalog() {
+			if first(c.Name) == word {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("dispatch word %q is not documented by any catalog command", word)
+		}
 	}
 }
 
@@ -1208,9 +1383,19 @@ func FuzzFlagsFirst(f *testing.F) {
 	f.Add("--include-ignored", "--quiet")
 	f.Add("a", "--")
 	f.Add("--severity", "")
+	f.Add("--org", "--json")
 	f.Fuzz(func(t *testing.T, a, b string) {
 		args := []string{a, b}
-		flags, positional := flagsFirst(args)
+		flags, positional, err := flagsFirst(args)
+		if err != nil {
+			// The rejection is only legal when a known value flag is
+			// followed by a flag-shaped token; anything else must parse.
+			missingValue := valueFlags[strings.TrimLeft(a, "-")] && !strings.Contains(a, "=") && isFlagShaped(b)
+			if !missingValue {
+				t.Fatalf("unexpected rejection for %q %q: %v", a, b, err)
+			}
+			return
+		}
 		total := len(flags) + len(positional)
 		hasTerminator := slices.Contains(args, "--")
 		if total > len(args) || (!hasTerminator && total != len(args)) {
@@ -1269,6 +1454,57 @@ func TestListRejectsPositional(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "takes no positional arguments") {
 		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// SNYK_TIMEOUT bounds the whole run: when the deadline fires, in-flight
+// work aborts with a canceled-kind envelope instead of hanging on the
+// (slow) server response.
+func TestRunTimeoutAbortsRun(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Second)
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+	clearScopeEnv(t)
+	t.Setenv("SNYK_API_URL", srv.URL)
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_TIMEOUT", "50ms")
+
+	s, out, _ := newStreams()
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--json"}, s)
+	}()
+	select {
+	case rc := <-done:
+		if rc != 1 {
+			t.Fatalf("rc = %d, want 1 on expired SNYK_TIMEOUT", rc)
+		}
+		env := decodeEnvelope(t, out.Bytes())
+		if env.Error == nil || env.Error.Kind != kindCanceled || !strings.Contains(env.Error.Message, "context deadline exceeded") {
+			t.Fatalf("envelope = %+v, want kind %q with the deadline error", env, kindCanceled)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return on the SNYK_TIMEOUT deadline")
+	}
+}
+
+// An invalid SNYK_TIMEOUT is a usage error (exit 2) before any command
+// work happens — a misconfigured duration must never silently disable
+// the deadline.
+func TestRunInvalidTimeoutIsUsageError(t *testing.T) {
+	for _, v := range []string{"nope", "-1s", "0s"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("SNYK_TIMEOUT", v)
+			s, _, errOut := newStreams()
+			if rc := Run(context.Background(), []string{"version"}, s); rc != 2 {
+				t.Fatalf("SNYK_TIMEOUT=%q rc = %d, want 2", v, rc)
+			}
+			if !strings.Contains(errOut.String(), "invalid SNYK_TIMEOUT") {
+				t.Errorf("stderr = %q", errOut.String())
+			}
+		})
 	}
 }
 

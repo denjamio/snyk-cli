@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/denjamio/snyk-cli/internal/snyk"
@@ -41,6 +43,26 @@ func snykClient(s Streams, args []string, command string, getenv envLookup) (*sn
 		client.HTTP.Timeout = d
 	}
 	return client, 0, true
+}
+
+// withRunTimeout optionally bounds the whole run with SNYK_TIMEOUT: a
+// positive Go duration becomes a context deadline, so in-flight requests,
+// pagination and retry waits all abort with a canceled-kind error when it
+// fires — a coarse cap over the per-request SNYK_HTTP_TIMEOUT and the
+// retry budget. Unset leaves the context untouched; the returned cancel
+// is always callable. An invalid value is a configuration error the
+// caller reports as a usage failure.
+func withRunTimeout(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	v := os.Getenv("SNYK_TIMEOUT")
+	if v == "" {
+		return ctx, func() {}, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return ctx, nil, fmt.Errorf("invalid SNYK_TIMEOUT: must be a positive duration like 90s or 2m")
+	}
+	cctx, cancel := context.WithTimeout(ctx, d)
+	return cctx, cancel, nil
 }
 
 // progressLogger renders client operational events (pagination, retries)

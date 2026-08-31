@@ -412,6 +412,90 @@ func TestNewClientBaseURL(t *testing.T) {
 	}
 }
 
+// cursor resolves the pagination link: relative cursors anchor at the
+// base URL, same-origin absolute ones pass through, and anything pointing
+// outside the base URL is refused — following it would send the
+// Authorization token to another host.
+func TestCursorResolvesAndRejectsLinks(t *testing.T) {
+	cl := &Client{BaseURL: "https://api.eu.snyk.io"}
+	cases := []struct {
+		name string
+		in   []string
+		want string
+		err  bool
+	}{
+		{"no link", []string{"", ""}, "", false},
+		{"relative", []string{"/rest/orgs/o/issues?starting_after=x"}, "https://api.eu.snyk.io/rest/orgs/o/issues?starting_after=x", false},
+		{"relative without slash", []string{"rest/orgs/o/issues"}, "https://api.eu.snyk.io/rest/orgs/o/issues", false},
+		{"same origin absolute", []string{"https://api.eu.snyk.io/rest?n=2"}, "https://api.eu.snyk.io/rest?n=2", false},
+		{"meta fallback", []string{"", "/rest?n=2"}, "https://api.eu.snyk.io/rest?n=2", false},
+		{"top-level wins", []string{"/rest?n=1", "/rest?n=2"}, "https://api.eu.snyk.io/rest?n=1", false},
+		{"cross origin host", []string{"https://evil.example/rest"}, "", true},
+		{"cross origin scheme", []string{"http://api.eu.snyk.io/rest"}, "", true},
+		{"protocol relative", []string{"//evil.example/rest"}, "", true},
+		{"unparseable", []string{"/x%zz"}, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cl.cursor(tc.in...)
+			if tc.err {
+				if err == nil {
+					t.Fatalf("cursor(%v) = %q, want an error", tc.in, got)
+				}
+				if got := kindOf(t, err); got != KindAPI {
+					t.Fatalf("kind = %q, want %q", got, KindAPI)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("cursor(%v): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("cursor(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// A compromised or misbehaving API must not be able to redirect the
+// pagination cursor to another host: the client refuses to follow the
+// cursor instead of sending it the Authorization token, and the failure
+// is a typed api error.
+func TestListRefusesCrossOriginCursor(t *testing.T) {
+	attackerHits := 0
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerHits++
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":[],"links":{}}`)
+	}))
+	defer attacker.Close()
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprintf(w, `{"data":[{"id":"a"}],"links":{"next":"%s/rest/orgs/o/issues?steal=1"}}`, attacker.URL)
+	}))
+	defer srv.Close()
+
+	_, _, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
+	if err == nil {
+		t.Fatal("want an error for a cross-origin cursor")
+	}
+	if got := kindOf(t, err); got != KindAPI {
+		t.Fatalf("kind = %q, want %q", got, KindAPI)
+	}
+	if !strings.Contains(err.Error(), "refusing to follow") {
+		t.Errorf("err = %v, want the refusal reason", err)
+	}
+	if attackerHits != 0 {
+		t.Fatalf("the cursor host received %d requests; the token must never leave the origin", attackerHits)
+	}
+	if requests != 1 {
+		t.Errorf("api requests = %d, want 1", requests)
+	}
+}
+
 func TestGetReturnsAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

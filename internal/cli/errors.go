@@ -34,6 +34,19 @@ func errorKind(err error) string {
 	}
 }
 
+// failureMessage renders a client error for the envelope, appending a
+// region hint to auth failures: a valid-looking token rejected with
+// 401/403 usually means the org lives behind another regional endpoint
+// than the default (EU) base URL.
+func failureMessage(err error) string {
+	msg := err.Error()
+	var apiErr *snyk.Error
+	if errors.As(err, &apiErr) && apiErr.Kind == snyk.KindAuth {
+		return msg + "; check SNYK_TOKEN and, for orgs outside the EU region, set SNYK_API_URL (default: " + snyk.DefaultBaseURL + ")"
+	}
+	return msg
+}
+
 // fail is the single path every failure takes to the user. The structured
 // envelope goes to stdout whenever the consumer is not a TTY or explicitly
 // asked for machine output (--json/--quiet), so agents and scripts parse

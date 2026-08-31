@@ -26,7 +26,10 @@ have — that is the gap this fills:
   once — no noise to filter.
 - **Hands-off reliability**: pagination, transient-failure retries (HTTP
   429/5xx and network-level errors, with jittered exponential backoff)
-  and rate-limit waits are handled inside the binary, not in your script. Progress (pages fetched, retry
+  and rate-limit waits are handled inside the binary, not in your script.
+  Retry waits share a per-request cumulative budget (2 minutes by
+  default), so a hostile `Retry-After` fails fast instead of stalling
+  the run. Progress (pages fetched, retry
   waits) is reported on stderr only when it is a terminal — piped
   and `--json` runs stay silent, so their output is the whole story
   (the one exception: the truncation warning, below).
@@ -120,7 +123,9 @@ the allowed set.
 
 Output modes: auto (TTY → table · piped → envelope), `--json` (envelope
 always), `--quiet` (bare array for `issues list`, single object for
-`issues get`). Errors are structured too: piped runs, and `--json`/
+`issues get`), and `--compact` (JSON without indentation — envelope or
+bare data — for large exports piped into other tools; it never affects
+the human table). Errors are structured too: piped runs, and `--json`/
 `--quiet` runs even on a terminal, get
 `{"ok":false,"command":...,"error":{"kind":...,"message":...}}` on
 stdout — for runtime errors and usage errors alike (usage errors also
@@ -136,11 +141,11 @@ it instead of matching message strings:
 |---|---|
 | `usage` | invalid invocation (exit 2): unknown flag or value, missing org/project |
 | `config` | environment misconfiguration (e.g. `SNYK_TOKEN` not set) |
-| `auth` | HTTP 401/403 — token revoked or unauthorized |
+| `auth` | HTTP 401/403 — token revoked or unauthorized (the message hints at the region: the default base URL serves the EU) |
 | `not_found` | HTTP 404 — unknown org, project or issue id |
-| `rate_limit` | HTTP 429 past the internal retry budget |
-| `transient` | HTTP 502/503/504 past the internal retry budget |
-| `network` | transport failure past the retries (refused/reset connection, timeout) |
+| `rate_limit` | HTTP 429 past the internal retry budget or wait cap |
+| `transient` | HTTP 502/503/504 past the internal retry budget or wait cap |
+| `network` | transport failure past the retries or the wait cap (refused/reset connection, timeout) |
 | `canceled` | the run was interrupted (SIGINT/SIGTERM) or its deadline passed |
 | `api` | any other non-200 HTTP status |
 | `decode` | a 200 response whose body is not the expected JSON |
@@ -263,6 +268,7 @@ Guarantees:
 | `SNYK_PROJECT_ID` | Default for `--project` on `issues list` (flag wins) |
 | `SNYK_API_URL` | Optional base URL (default `https://api.eu.snyk.io`) |
 | `SNYK_HTTP_TIMEOUT` | Optional per-request HTTP timeout, Go duration like `90s` (default `60s`) |
+| `SNYK_TIMEOUT` | Optional whole-run deadline, Go duration like `2m` (default none); on expiry the run fails with `error.kind` `canceled` |
 
 Precedence is flag > env var: an explicit `--org`/`--project` overrides the
 matching env var; an env var set to the empty string counts as unset.

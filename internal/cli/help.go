@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -8,7 +9,7 @@ import (
 	"github.com/denjamio/snyk-cli/internal/output"
 )
 
-func runHelp(args []string, s Streams) int {
+func runHelp(_ context.Context, args []string, s Streams) int {
 	cmd, code := parseCommand(helpSpec, args, s)
 	if cmd == nil {
 		return code
@@ -20,15 +21,11 @@ func runHelp(args []string, s Streams) int {
 		printUsage(s.Out)
 		return 0
 	}
-	if err := output.WriteJSON(s.Out, output.Envelope{
+	return writeEnvelope(s, output.Envelope{
 		OK:      true,
 		Command: "help",
 		Data:    map[string]any{"commands": catalog()},
-	}); err != nil {
-		fmt.Fprintln(s.Err, "error:", err)
-		return 1
-	}
-	return 0
+	})
 }
 
 // printUsage renders the human usage text. Flag blocks are generated from
@@ -65,6 +62,7 @@ Output modes:
   terminal             Human-readable table
   piped / --json       {"ok":true,"command":...,"summary":...,"data":...}
   --quiet              Raw data only
+  --compact            JSON without indentation (piped, --json or --quiet)
 
 Environment:
   SNYK_TOKEN           Required API token
@@ -72,6 +70,7 @@ Environment:
   SNYK_PROJECT_ID      Default for --project on issues list (flag wins)
   SNYK_API_URL         Optional API base URL (default https://api.eu.snyk.io)
   SNYK_HTTP_TIMEOUT    Optional per-request timeout, Go duration (default 60s)
+  SNYK_TIMEOUT         Optional whole-run deadline, Go duration (default none)
 
 Exit codes: 0 success · 1 runtime error · 2 usage error
 Piped failures carry {"ok":false,...,"error":{"kind":...,"message":...}}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,7 @@ import (
 // skill always travels version-matched with the CLI. Default destination is
 // ./.agents/skills in the current project; --global targets ~/.agents and
 // --dir overrides both. --print emits the raw markdown instead.
-func runSkill(args []string, s Streams) int {
+func runSkill(_ context.Context, args []string, s Streams) int {
 	cmd, code := parseCommand(skillSpec, args, s)
 	if cmd == nil {
 		return code
@@ -28,7 +29,7 @@ func runSkill(args []string, s Streams) int {
 	}
 	if f.getBool("print") {
 		if f.getBool("global") || f.getString("dir") != "" {
-			return usageError(s, args, skillSpec.Name, "--print cannot be combined with a destination")
+			return usageError(s, cmd.args, skillSpec.Name, "--print cannot be combined with a destination")
 		}
 		fmt.Fprint(s.Out, embedded.SkillMD)
 		return 0
@@ -41,30 +42,31 @@ func runSkill(args []string, s Streams) int {
 	case f.getBool("global"):
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return runtimeError(s, args, "skill", kindInternal, err.Error())
+			return runtimeError(s, cmd.args, "skill", kindInternal, err.Error())
 		}
 		base = home
 	default:
 		cwd, err := os.Getwd()
 		if err != nil {
-			return runtimeError(s, args, "skill", kindInternal, err.Error())
+			return runtimeError(s, cmd.args, "skill", kindInternal, err.Error())
 		}
 		base = cwd
 	}
 	target := filepath.Join(base, ".agents", "skills", "snyk", "SKILL.md")
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return runtimeError(s, args, "skill", kindInternal, err.Error())
+		return runtimeError(s, cmd.args, "skill", kindInternal, err.Error())
 	}
 	action := "installed"
 	if prev, err := os.ReadFile(target); err == nil && string(prev) == embedded.SkillMD {
 		action = "already up to date"
 	} else if err := writeFileAtomic(target, []byte(embedded.SkillMD), 0o644); err != nil {
-		return runtimeError(s, args, "skill", kindInternal, err.Error())
+		return runtimeError(s, cmd.args, "skill", kindInternal, err.Error())
 	}
 	summary := fmt.Sprintf("skill %s at %s", action, target)
 	mode := output.ResolveMode(f.getBool("json"), false)
-	return emit(s, mode, "skill", summary, map[string]any{"path": target}, func(w io.Writer) {
-		fmt.Fprintln(w, summary)
+	return emit(s, mode, false, "skill", summary, map[string]any{"path": target}, func(w io.Writer) error {
+		_, err := fmt.Fprintln(w, summary)
+		return err
 	})
 }
 

@@ -1,0 +1,34 @@
+{
+  "ok": true,
+  "command": "issues get",
+  "summary": "1 issue",
+  "data": {
+    "id": "c",
+    "key": "k3",
+    "title": "C detail",
+    "issue_type": "cloud",
+    "severity": "medium",
+    "status": "open",
+    "ignored": false,
+    "org_id": "o1",
+    "project_id": "",
+    "created_at": "",
+    "updated_at": "",
+    "description": "",
+    "remediation": {
+      "manual_steps": "Fix it"
+    },
+    "risk_score": null,
+    "location": null,
+    "locations": [],
+    "cwes": [],
+    "introduced_at": "",
+    "last_resolved_at": "",
+    "last_resolved_details": "",
+    "fixable_manually": false,
+    "fixable_snyk": false,
+    "fixable_upstream": false,
+    "code_flows": [],
+    "code_flows_omitted": false
+  }
+}

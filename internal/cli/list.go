@@ -29,27 +29,27 @@ func runList(ctx context.Context, args []string, s Streams) int {
 	f := cmd.flags
 	org := resolveSetting(f.getString("org"), "SNYK_ORG_ID", os.Getenv)
 	if org == "" {
-		return usageError(s, args, issuesListSpec.Name, "--org is required (or set SNYK_ORG_ID)")
+		return usageError(s, cmd.args, issuesListSpec.Name, "--org is required (or set SNYK_ORG_ID)")
 	}
 	project := resolveSetting(f.getString("project"), "SNYK_PROJECT_ID", os.Getenv)
 	if project == "" {
-		return usageError(s, args, issuesListSpec.Name, "--project is required (or set SNYK_PROJECT_ID)")
+		return usageError(s, cmd.args, issuesListSpec.Name, "--project is required (or set SNYK_PROJECT_ID)")
 	}
 	createdAfter := f.getString("created-after")
 	if createdAfter != "" {
 		if _, err := time.Parse(time.RFC3339, createdAfter); err != nil {
-			return usageError(s, args, issuesListSpec.Name, "invalid --created-after: must be an RFC3339 date-time like 2026-08-01T00:00:00Z")
+			return usageError(s, cmd.args, issuesListSpec.Name, "invalid --created-after: must be an RFC3339 date-time like 2026-08-01T00:00:00Z")
 		}
 	}
 	sevToks, err := normalizeList(f.getString("severity"), severities, "severity")
 	if err != nil {
-		return usageError(s, args, issuesListSpec.Name, err.Error())
+		return usageError(s, cmd.args, issuesListSpec.Name, err.Error())
 	}
 	statusToks, err := normalizeList(f.getString("status"), statuses, "status")
 	if err != nil {
-		return usageError(s, args, issuesListSpec.Name, err.Error())
+		return usageError(s, cmd.args, issuesListSpec.Name, err.Error())
 	}
-	client, code, ok := snykClient(s, args, issuesListSpec.Name, os.Getenv)
+	client, code, ok := snykClient(s, cmd.args, issuesListSpec.Name, os.Getenv)
 	if !ok {
 		return code
 	}
@@ -61,11 +61,11 @@ func runList(ctx context.Context, args []string, s Streams) int {
 		IncludeCodeFlows: f.getBool("include-code-flows"),
 	})
 	if err != nil {
-		return runtimeError(s, args, "issues list", errorKind(err), err.Error())
+		return runtimeError(s, cmd.args, "issues list", errorKind(err), failureMessage(err))
 	}
 	raw, truncated, err := client.List(ctx, org, query)
 	if err != nil {
-		return runtimeError(s, args, "issues list", errorKind(err), err.Error())
+		return runtimeError(s, cmd.args, "issues list", errorKind(err), failureMessage(err))
 	}
 	if truncated {
 		// Truncation is an anomaly, not progress: unlike the progress
@@ -74,16 +74,22 @@ func runList(ctx context.Context, args []string, s Streams) int {
 		// listing for the full set.
 		fmt.Fprintf(s.Err, "snyk: listing truncated at the %d-issue page cap; narrow with --severity or --created-after to see the rest\n", snyk.MaxPages*snyk.PageLimit)
 	}
-	items := snyk.NormalizeAll(raw)
-	groups := snyk.GroupByType(items)
+	// One normalization pass, then grouping: TotalIssues is the sum of
+	// the group members, so no flat intermediate slice is kept alive.
+	groups := snyk.GroupByType(snyk.NormalizeAll(raw))
+	total := 0
+	for _, g := range groups {
+		total += len(g.Issues)
+	}
 	mode := output.ResolveMode(f.getBool("json"), f.getBool("quiet"))
-	var data any = snyk.ListData{TotalIssues: len(items), Groups: groups, Truncated: truncated}
+	compact := f.getBool("compact")
+	var data any = snyk.ListData{TotalIssues: total, Groups: groups, Truncated: truncated}
 	if mode == output.ModeQuiet {
 		data = groups
 	}
-	summary := summarize(len(items), strings.Join(statusToks, ","), f.getBool("include-ignored"), strings.Join(sevToks, ","), createdAfter, truncated)
-	return emit(s, mode, "issues list", summary, data, func(w io.Writer) {
-		output.RenderGroupsTable(w, tableGroups(groups), summary)
+	summary := summarize(total, strings.Join(statusToks, ","), f.getBool("include-ignored"), strings.Join(sevToks, ","), createdAfter, truncated)
+	return emit(s, mode, compact, "issues list", summary, data, func(w io.Writer) error {
+		return output.RenderGroupsTable(w, tableGroups(groups), summary)
 	})
 }
 

@@ -15,7 +15,7 @@ const (
 	KindRateLimit Kind = "rate_limit" // 429: rate limited past the retry budget
 	KindTransient Kind = "transient"  // 502/503/504: upstream down past the retry budget
 	KindNetwork   Kind = "network"    // transport failure: refused/reset connection, timeout, TLS
-	KindAPI       Kind = "api"        // any other non-200 HTTP status
+	KindAPI       Kind = "api"        // any other non-200 HTTP status, or an anomalous response (e.g. a cross-origin pagination cursor)
 	KindDecode    Kind = "decode"     // a 200 response whose body is not the expected JSON
 )
 

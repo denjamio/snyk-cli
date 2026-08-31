@@ -28,11 +28,11 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 	}
 	raw, err := client.Get(ctx, org, cmd.positional[0])
 	if err != nil {
-		return runtimeError(s, cmd.args, "issues get", errorKind(err), err.Error())
+		return runtimeError(s, cmd.args, "issues get", errorKind(err), failureMessage(err))
 	}
 	item := snyk.Normalize(*raw)
 	mode := output.ResolveMode(f.getBool("json"), f.getBool("quiet"))
-	return emit(s, mode, "issues get", "1 issue", item, func(w io.Writer) {
-		output.RenderIssuesTable(w, []output.Row{tableRow(item)}, "1 issue")
+	return emit(s, mode, f.getBool("compact"), "issues get", "1 issue", item, func(w io.Writer) error {
+		return output.RenderIssuesTable(w, []output.Row{tableRow(item)}, "1 issue")
 	})
 }

@@ -68,6 +68,8 @@ fetch binaries yourself.
   stderr output they ever get is the truncation warning. Parse stdout
   only.
 - Use `--quiet` only when the bare groups array is needed for scripting.
+  Add `--compact` for unindented, single-line JSON when piping large
+  exports into other tools.
 
 ## Output envelope
 

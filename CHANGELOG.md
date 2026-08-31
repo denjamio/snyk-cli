@@ -8,6 +8,14 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Changed
 
+- Retry waits share a cumulative per-request budget (default 2 minutes,
+  `429` `Retry-After` waits included): when the next wait would exceed
+  it, the request fails fast with the matching `error.kind`
+  (`rate_limit`, `transient` or `network`) instead of stalling. The
+  retry-progress line now always names the wait actually applied.
+- Auth failures (HTTP 401/403) append a region hint to the error
+  message: the default base URL serves the EU region, so orgs elsewhere
+  need `SNYK_API_URL`.
 - Runtime errors now emit the structured failure envelope on a terminal
   too when `--json`/`--quiet` was explicitly requested — the documented
   contract, previously only held for usage errors; plain terminal runs
@@ -53,6 +61,9 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- `--compact` output flag: JSON without indentation (envelope or bare
+  `--quiet` data) — smaller payloads for large exports piped into other
+  tools; it never affects the human table.
 - `version --json`: the version through the standard
   `{ok, command, data}` envelope (`data.version`), so agents read it
   without parsing prose.

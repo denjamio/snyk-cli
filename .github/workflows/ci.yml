@@ -37,6 +37,14 @@ jobs:
         with:
           go-version: "1.25"
       - run: go test -race -coverprofile=coverage.out ./...
+      - name: coverage gate
+        run: |
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')"
+          echo "total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { if (t+0 < 85) exit 1 }' || {
+            echo "coverage ${total}% is below the 85% gate" >&2
+            exit 1
+          }
       - uses: codecov/codecov-action@v7
         with:
           files: coverage.out

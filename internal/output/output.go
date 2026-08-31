@@ -59,8 +59,22 @@ func WriteJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+// WriteCompactJSON writes v as a single line — no indentation — for
+// consumers that prefer smaller payloads over readability (large
+// exports piped into other tools).
+func WriteCompactJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
 func WriteEnvelope(w io.Writer, command, summary string, data any) error {
 	return WriteJSON(w, Envelope{OK: true, Command: command, Summary: summary, Data: data})
+}
+
+// WriteCompactEnvelope is WriteEnvelope without indentation.
+func WriteCompactEnvelope(w io.Writer, command, summary string, data any) error {
+	return WriteCompactJSON(w, Envelope{OK: true, Command: command, Summary: summary, Data: data})
 }
 
 // Row is one issue as the tables render it: a presentation-only
@@ -82,32 +96,51 @@ type Group struct {
 	Rows     []Row
 }
 
-func RenderIssuesTable(w io.Writer, rows []Row, summary string) {
-	fmt.Fprintln(w, summary)
-	fmt.Fprintln(w)
+// RenderIssuesTable renders the flat issues table. Write failures are
+// returned: a half-written table must not pass for success.
+func RenderIssuesTable(w io.Writer, rows []Row, summary string) error {
+	if _, err := fmt.Fprintln(w, summary); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "SEVERITY\tTYPE\tTITLE\tWHERE\tPROJECT")
 	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 			severityLabel(r.Severity), r.Type, truncateRight(r.Title, 40), r.Where, r.Project)
 	}
-	_ = tw.Flush()
+	return tw.Flush()
 }
 
-func RenderGroupsTable(w io.Writer, groups []Group, summary string) {
-	fmt.Fprintln(w, summary)
-	fmt.Fprintln(w)
+// RenderGroupsTable renders the grouped issues view. Write failures are
+// returned: a half-written table must not pass for success.
+func RenderGroupsTable(w io.Writer, groups []Group, summary string) error {
+	if _, err := fmt.Fprintln(w, summary); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
 	for _, g := range groups {
-		fmt.Fprintf(w, "== %s · %d issues · %s\n", g.Title, len(g.Rows), severityLabel(g.Severity))
+		if _, err := fmt.Fprintf(w, "== %s · %d issues · %s\n", g.Title, len(g.Rows), severityLabel(g.Severity)); err != nil {
+			return err
+		}
 		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "  SEVERITY\tWHERE\tPROJECT\tID")
 		for _, r := range g.Rows {
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
 				severityLabel(r.Severity), r.Where, r.Project, r.ID)
 		}
-		_ = tw.Flush()
-		fmt.Fprintln(w)
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func severityLabel(severity string) string {

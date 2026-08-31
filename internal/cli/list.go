@@ -49,9 +49,9 @@ func runList(ctx context.Context, args []string, s Streams) int {
 	if err != nil {
 		return usageError(s, cmd.args, issuesListSpec.Name, err.Error())
 	}
-	client, code, ok := snykClient(s, cmd.args, issuesListSpec.Name, os.Getenv)
-	if !ok {
-		return code
+	client, err := snykClient(s, os.Getenv)
+	if err != nil {
+		return reportRunError(s, cmd.args, issuesListSpec.Name, err)
 	}
 	query, err := snyk.BuildListQuery(snyk.ListOptions{Severity: strings.Join(sevToks, ","),
 		Status:           strings.Join(statusToks, ","),

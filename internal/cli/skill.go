@@ -53,7 +53,7 @@ func runSkill(_ context.Context, args []string, s Streams) int {
 		base = cwd
 	}
 	target := filepath.Join(base, ".agents", "skills", "snyk", "SKILL.md")
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return runtimeError(s, cmd.args, "skill", kindInternal, err.Error())
 	}
 	action := "installed"

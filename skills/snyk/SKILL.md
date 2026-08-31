@@ -55,6 +55,9 @@ fetch binaries yourself.
   evidence with `--include-code-flows` (heavier payload).
 - Credentials come exclusively from the `SNYK_TOKEN` environment variable:
   never echo, store or persist it anywhere.
+- `SNYK_TIMEOUT` optionally bounds the whole run with a Go duration (e.g.
+  `2m`): on expiry the run fails with `error.kind` `canceled`. Set it when
+  an invocation must not hang.
 - Pagination, retries (429/5xx and network-level errors) and API-version
   pinning are handled inside the binary. Do not paginate manually or
   re-run in a retry loop; an exit 1 means retries were exhausted or the
@@ -135,6 +138,10 @@ Common issues:
 
 - kind `config`, message `SNYK_TOKEN not set` → ask the user to export
   `SNYK_TOKEN` before retrying.
+- kind `auth` → the token was rejected: check `SNYK_TOKEN`, and if the org
+  lives outside the EU region set `SNYK_API_URL` to its regional endpoint
+  (the error message carries the same hint; the default base URL serves
+  the EU).
 - `--org is required (or set SNYK_ORG_ID)` / `--project is required (or
   set SNYK_PROJECT_ID)` → resolve the ID from context or ask the user;
   retry with the flag or the env var.

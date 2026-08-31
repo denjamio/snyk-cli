@@ -149,6 +149,34 @@ func TestWriteEnvelopeShape(t *testing.T) {
 	}
 }
 
+// The compact writers are the single-line counterparts of WriteJSON and
+// WriteEnvelope: same payload, no indentation.
+func TestWriteCompactJSONIsSingleLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteCompactJSON(&buf, map[string]any{"total_issues": 3}); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); got != `{"total_issues":3}`+"\n" {
+		t.Errorf("WriteCompactJSON = %q, want one compact line", got)
+	}
+}
+
+func TestWriteCompactEnvelopeIsSingleLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteCompactEnvelope(&buf, "issues list", "3 issues", map[string]any{"total_issues": 3}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Count(out, "\n") != 1 || strings.HasPrefix(out, "{\n") {
+		t.Errorf("WriteCompactEnvelope = %q, want a single-line envelope", out)
+	}
+	for _, want := range []string{`"ok":true`, `"command":"issues list"`, `"summary":"3 issues"`, `"total_issues":3`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compact envelope missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestTruncateRight(t *testing.T) {
 	cases := []struct {
 		in   string

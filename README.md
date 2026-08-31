@@ -100,6 +100,7 @@ as new resources):
 |---|---|
 | `issues list` | List issues of a project |
 | `issues get ISSUE_ID` | Get a single issue with full detail |
+| `skill [--global] [--dir DIR] [--print]` | Install or print the embedded agent skill (see [Agent integration](#agent-integration)) |
 | `help [--json]` | Usage text or machine-readable command catalog |
 | `version [--json]` | Print version (plain text or JSON envelope) |
 
@@ -338,8 +339,8 @@ skills/                agent skill definition
 .github/workflows/     CI (lint, race+coverage, e2e, build matrix) · Release
 ```
 
-Pushing a tag `vX.Y.Z` triggers GoReleaser: five platforms, SHA-256
-checksums, draft GitHub release.
+Pushing a tag `vX.Y.Z` triggers GoReleaser: linux/darwin/windows on
+amd64/arm64 (six platforms), SHA-256 checksums, draft GitHub release.
 
 ## Changelog
 

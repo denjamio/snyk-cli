@@ -168,9 +168,9 @@ func Run(ctx context.Context, args []string, s Streams) int {
 	if len(args) == 0 {
 		return usageError(s, args, "", "missing command")
 	}
-	ctx, cancel, err := withRunTimeout(ctx)
+	ctx, cancel, err := withRunTimeout(ctx, os.Getenv)
 	if err != nil {
-		return usageError(s, args, args[0], err.Error())
+		return reportRunError(s, args, args[0], err)
 	}
 	defer cancel()
 	if fn, ok := dispatch[args[0]]; ok {

@@ -8,6 +8,22 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Changed
 
+- `snyk skill` creates the destination directories with 0750 instead of
+  0755 (only the owner and group can traverse); the installed SKILL.md
+  keeps its 0644 mode.
+- `issues list` refuses to follow a pagination cursor that points outside
+  the configured API base URL (`SNYK_API_URL`): following one would send
+  the `Authorization` token to another host, so the run fails instead
+  with `error.kind` `api` and a message naming the cursor.
+- A value flag followed by a flag-shaped token (`--org --json`) is a
+  usage error (exit 2): the flag package would silently bind the token
+  as the value and the run would reach the API with a wrong value.
+- `SNYK_TIMEOUT` optionally bounds the whole run with a Go duration: on
+  expiry in-flight work aborts with `error.kind` `canceled`, a coarse
+  cap over the per-request `SNYK_HTTP_TIMEOUT` and the retry budget.
+- Human table rendering propagates write failures as a runtime error
+  (exit 1) — a half-written table no longer passes for success.
+
 - Retry waits share a cumulative per-request budget (default 2 minutes,
   `429` `Retry-After` waits included): when the next wait would exceed
   it, the request fails fast with the matching `error.kind`
@@ -82,6 +98,8 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Fixed
 
+- The e2e mock server binds an ephemeral port (reported on stdout)
+  instead of the fixed 8899, so concurrent CI runs cannot collide.
 - `snyk skill install` fsyncs the skill file before the atomic rename, so
   a crash right after the install cannot leave an empty `SKILL.md`.
 - The closed-payload guarantee now holds at leaf level too:

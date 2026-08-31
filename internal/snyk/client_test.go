@@ -28,6 +28,23 @@ func kindOf(t *testing.T, err error) Kind {
 	return e.Kind
 }
 
+// Unwrap exposes the wrapped cause, so errors.Is and errors.As keep
+// working through the typed error.
+func TestErrorUnwrap(t *testing.T) {
+	cause := errors.New("boom")
+	wrapped := &Error{Kind: KindNetwork, err: cause}
+	if !errors.Is(wrapped, cause) {
+		t.Fatal("errors.Is(wrapped, cause) = false; Unwrap broken")
+	}
+	if wrapped.Error() != "boom" {
+		t.Fatalf("Error() = %q, want the wrapped message unchanged", wrapped.Error())
+	}
+	var e *Error
+	if !errors.As(wrapped, &e) || e.Kind != KindNetwork {
+		t.Fatal("errors.As failed on the typed error")
+	}
+}
+
 // mustQuery builds a list query with the project scope filled in, failing
 // the test when the options are not buildable.
 func mustQuery(t *testing.T, o ListOptions) url.Values {

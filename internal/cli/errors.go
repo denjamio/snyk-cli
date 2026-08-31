@@ -34,6 +34,28 @@ func errorKind(err error) string {
 	}
 }
 
+// runError is a pre-classified failure raised before any API call: it
+// carries the envelope kind and the exit code the run must return, so
+// producers return an error instead of an exit code and the reporting
+// stays in one place.
+type runError struct {
+	kind string
+	exit int
+	msg  string
+}
+
+func (e *runError) Error() string { return e.msg }
+
+// reportRunError routes a failure through fail: a *runError supplies its
+// own kind and exit code, anything else is an internal runtime error.
+func reportRunError(s Streams, args []string, command string, err error) int {
+	var rerr *runError
+	if errors.As(err, &rerr) {
+		return fail(s, args, command, rerr.kind, rerr.msg, rerr.exit)
+	}
+	return runtimeError(s, args, command, kindInternal, err.Error())
+}
+
 // failureMessage renders a client error for the envelope, appending a
 // region hint to auth failures: a valid-looking token rejected with
 // 401/403 usually means the org lives behind another regional endpoint

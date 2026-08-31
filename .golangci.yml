@@ -11,9 +11,23 @@ linters:
     - unused
     - ineffassign
     - misspell
+    - gocritic
+    - gosec
   settings:
     errcheck:
       exclude-functions:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+    gosec:
+      excludes:
+        - G103 # unsafe.Pointer in the isatty probes: the standard syscall
+          # idiom for the TCGETS/TIOCGETA/GetConsoleMode ioctls
+        - G114 # http.Serve without timeouts: only the e2e mock server, on
+          # an ephemeral loopback port with a controlled client
+        - G304 # file reads on a variable path: only user- or test-supplied
+          # destinations (skill install target, testdata golden files)
+        - G115 # integer conversions: the isatty probes convert fd int to
+          # uintptr per the syscall signature
+        - G404 # math/rand/v2 for retry jitter: backoff must not be
+          # correlated across runs; no security property rests on it

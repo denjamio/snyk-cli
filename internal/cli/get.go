@@ -22,9 +22,9 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 	if org == "" {
 		return usageError(s, cmd.args, issuesGetSpec.Name, "--org is required (or set SNYK_ORG_ID)")
 	}
-	client, code, ok := snykClient(s, cmd.args, issuesGetSpec.Name, os.Getenv)
-	if !ok {
-		return code
+	client, err := snykClient(s, os.Getenv)
+	if err != nil {
+		return reportRunError(s, cmd.args, issuesGetSpec.Name, err)
 	}
 	raw, err := client.Get(ctx, org, cmd.positional[0])
 	if err != nil {

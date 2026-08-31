@@ -472,6 +472,25 @@ func TestGroupByTypeFallsBackToTitleAndMergesSameRule(t *testing.T) {
 	}
 }
 
+// NormalizeAll flattens every raw issue in input order.
+func TestNormalizeAllPreservesInputOrder(t *testing.T) {
+	var raw []RawIssue
+	for _, id := range []string{"b", "a", "c"} {
+		var r RawIssue
+		if err := json.Unmarshal([]byte(`{"id":"`+id+`","attributes":{"key":"k","title":"T","type":"code","effective_severity_level":"low","status":"open","ignored":false},"relationships":{"organization":{"data":{"id":"o1"}},"scan_item":{"data":{"id":"p1","type":"project"}}}}`), &r); err != nil {
+			t.Fatal(err)
+		}
+		raw = append(raw, r)
+	}
+	items := NormalizeAll(raw)
+	if len(items) != 3 || items[0].ID != "b" || items[1].ID != "a" || items[2].ID != "c" {
+		t.Fatalf("ids = %v, want input order [b a c]", ids(items))
+	}
+	if items[0].OrgID != "o1" || items[0].ProjectID != "p1" {
+		t.Errorf("first item = %+v", items[0])
+	}
+}
+
 func ids(items []Issue) []string {
 	out := make([]string, len(items))
 	for i, it := range items {

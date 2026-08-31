@@ -28,6 +28,46 @@ func newStreams() (Streams, *bytes.Buffer, *bytes.Buffer) {
 	return Streams{Out: out, Err: errOut, OutIsTTY: false}, out, errOut
 }
 
+// NewOSStreams wires the process streams; under go test they are pipes,
+// so neither side reports a TTY.
+func TestNewOSStreamsWiresTheProcessStreams(t *testing.T) {
+	s := NewOSStreams()
+	if s.Out != os.Stdout || s.Err != os.Stderr {
+		t.Fatalf("streams = %v/%v, want the process stdout/stderr", s.Out, s.Err)
+	}
+	if s.OutIsTTY || s.ErrIsTTY {
+		t.Error("piped test streams must not report TTY")
+	}
+}
+
+// reportRunError maps a *runError to its own kind and exit code, and
+// anything else to an internal runtime failure.
+func TestReportRunErrorClassifies(t *testing.T) {
+	s, out, _ := newStreams()
+	if rc := reportRunError(s, nil, "issues list", &runError{kind: kindUsage, exit: 2, msg: "bad invocation"}); rc != 2 {
+		t.Fatalf("rc = %d, want the runError's exit code 2", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if env.Error == nil || env.Error.Kind != kindUsage || env.Error.Message != "bad invocation" {
+		t.Fatalf("envelope = %+v", env)
+	}
+
+	s, out, _ = newStreams()
+	if rc := reportRunError(s, nil, "issues list", errors.New("unexpected")); rc != 1 {
+		t.Fatalf("rc = %d, want 1 for a plain error", rc)
+	}
+	env = decodeEnvelope(t, out.Bytes())
+	if env.Error == nil || env.Error.Kind != kindInternal {
+		t.Fatalf("envelope = %+v, want kind internal", env)
+	}
+	if got := errorKind(errors.New("plain")); got != kindInternal {
+		t.Errorf("errorKind(plain) = %q, want internal", got)
+	}
+	if got := (&runError{msg: "m"}).Error(); got != "m" {
+		t.Errorf("runError.Error() = %q", got)
+	}
+}
+
 var updateGolden = flag.Bool("update", false, "rewrite the golden files")
 
 // TestListEnvelopeGolden pins the JSON envelope contract byte for byte:
@@ -42,7 +82,7 @@ func TestListEnvelopeGolden(t *testing.T) {
 	}
 	golden := filepath.Join("testdata", "issues_list_envelope.json")
 	if *updateGolden {
-		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+		if err := os.WriteFile(golden, out.Bytes(), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -669,7 +709,7 @@ func TestGetEnvelopeGolden(t *testing.T) {
 	}
 	golden := filepath.Join("testdata", "issues_get_envelope.json")
 	if *updateGolden {
-		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+		if err := os.WriteFile(golden, out.Bytes(), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -850,7 +890,7 @@ func TestSkillInstallExplicitDir(t *testing.T) {
 func TestSkillInstallReplacesStaleFileAndPermissions(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, ".agents", "skills", "snyk", "SKILL.md")
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, []byte("stale"), 0o600); err != nil {

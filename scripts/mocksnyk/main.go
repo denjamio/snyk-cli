@@ -1,11 +1,11 @@
 // Command mocksnyk is the minimal in-process Snyk REST mock the e2e
-// suite (scripts/e2e.sh) runs against: two pages of issues with
-// severity filtering, a detail endpoint for issue "c" and 404s for
-// everything else. It serves the same fixtures the former python mock
-// did, so the e2e assertions are unchanged — and the suite no longer
-// needs python3. It binds an ephemeral port and prints the listen
-// address on stdout, so parallel or concurrent CI runs cannot collide
-// on a fixed port.
+// suite (scripts/e2e.sh) runs against: two pages of issues with severity
+// filtering and project scoping (only scan_item.id=p1 serves data), a
+// detail endpoint for issue "c" and 404s for everything else. The
+// pagination cursor echoes the request's query, so filters and scope
+// travel to the next page the way the real API's cursors do. It binds an
+// ephemeral port and prints the listen address on stdout, so parallel or
+// concurrent CI runs cannot collide on a fixed port.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -84,6 +85,13 @@ func write(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// projectScoped reports whether the query targets the project the mock
+// serves (p1) or carries no scope at all (detail requests).
+func projectScoped(q url.Values) bool {
+	id := q.Get("scan_item.id")
+	return id == "" || id == "p1"
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var sev map[string]bool
@@ -103,12 +111,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				"errors": []map[string]any{{"code": "NOT_FOUND", "detail": "issue not found"}},
 			})
 		}
+	case !projectScoped(q):
+		// The scope traveled in the query but does not match: serve an
+		// empty page so the e2e suite can observe which project actually
+		// reached the API.
+		write(w, http.StatusOK, map[string]any{"data": []map[string]any{}, "links": map[string]any{}})
 	case q.Has("starting_after"):
 		write(w, http.StatusOK, map[string]any{"data": matches(page2(), sev), "links": map[string]any{}})
 	default:
+		// The cursor carries the request's query with it, so filters and
+		// scope reach every page the way the real API's cursors do.
+		next := "/rest/orgs/o/issues?starting_after=zz"
+		if rq := r.URL.RawQuery; rq != "" {
+			next = "/rest/orgs/o/issues?" + rq + "&starting_after=zz"
+		}
 		write(w, http.StatusOK, map[string]any{
 			"data":  matches(page1(), sev),
-			"links": map[string]any{"next": "/rest/orgs/o/issues?starting_after=zz"},
+			"links": map[string]any{"next": next},
 		})
 	}
 }

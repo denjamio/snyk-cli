@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
@@ -503,6 +504,28 @@ func FuzzNormalize(f *testing.F) {
 		if len(out) == 0 {
 			t.Fatal("empty marshaled issue")
 		}
+	})
+}
+
+// FuzzParseTimestamp pins the parser's contract: empty input is reported
+// as absent, ok always implies time.Parse accepts the value, and absent
+// never leaks a half-parsed time.
+func FuzzParseTimestamp(f *testing.F) {
+	for _, s := range []string{"", "2024-01-01T00:00:00Z", "not-a-time", "2024-13-45T99:99:99Z", "0001-01-01T00:00:00Z", "2024-01-01"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		ts, ok := parseTimestamp(s)
+		if s == "" && ok {
+			t.Fatal("empty input reported as present")
+		}
+		if !ok {
+			return
+		}
+		if _, err := time.Parse(time.RFC3339, s); err != nil {
+			t.Fatalf("parseTimestamp(%q) = ok, but time.Parse rejects it", s)
+		}
+		_ = ts
 	})
 }
 

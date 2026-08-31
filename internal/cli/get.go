@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"io"
+	"os"
 
 	"github.com/denjamio/snyk-cli/internal/output"
 	"github.com/denjamio/snyk-cli/internal/snyk"
@@ -17,11 +18,11 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 		return usageError(s, cmd.args, issuesGetSpec.Name, "exactly one ISSUE_ID argument is required")
 	}
 	f := cmd.flags
-	org := resolveSetting(f.getString("org"), "SNYK_ORG_ID")
+	org := resolveSetting(f.getString("org"), "SNYK_ORG_ID", os.Getenv)
 	if org == "" {
 		return usageError(s, cmd.args, issuesGetSpec.Name, "--org is required (or set SNYK_ORG_ID)")
 	}
-	client, code, ok := snykClient(s, cmd.args, issuesGetSpec.Name)
+	client, code, ok := snykClient(s, cmd.args, issuesGetSpec.Name, os.Getenv)
 	if !ok {
 		return code
 	}

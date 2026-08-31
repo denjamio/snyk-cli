@@ -137,6 +137,7 @@ Common issues:
   set SNYK_PROJECT_ID)` → resolve the ID from context or ask the user;
   retry with the flag or the env var.
 - `command not found` → the CLI is not installed; ask the user to install
-  it (one-line installers in the repository README).
+  it (one-line installers in the repository README). Verify an existing
+  install with `snyk version --json` (envelope, `data.version`).
 - kind `not_found` on `issues get` → the `ISSUE_ID` is wrong or does not
   belong to this org; re-check the id instead of retrying.

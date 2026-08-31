@@ -25,8 +25,8 @@ have — that is the gap this fills:
   final tie-break — a total order. Diff two runs, schedule an export, store
   once — no noise to filter.
 - **Hands-off reliability**: pagination, transient-failure retries (HTTP
-  429/5xx and network-level errors) and rate-limit waits are handled
-  inside the binary, not in your script. Progress (pages fetched, retry
+  429/5xx and network-level errors, with jittered exponential backoff)
+  and rate-limit waits are handled inside the binary, not in your script. Progress (pages fetched, retry
   waits) is reported on stderr only when it is a terminal — piped
   and `--json` runs stay silent, so their output is the whole story
   (the one exception: the truncation warning, below).
@@ -98,7 +98,7 @@ as new resources):
 | `issues list` | List issues of a project |
 | `issues get ISSUE_ID` | Get a single issue with full detail |
 | `help [--json]` | Usage text or machine-readable command catalog |
-| `version` | Print version |
+| `version [--json]` | Print version (plain text or JSON envelope) |
 
 `issues list` filters:
 
@@ -120,10 +120,12 @@ the allowed set.
 
 Output modes: auto (TTY → table · piped → envelope), `--json` (envelope
 always), `--quiet` (bare array for `issues list`, single object for
-`issues get`). Errors are structured too: piped/JSON →
+`issues get`). Errors are structured too: piped runs, and `--json`/
+`--quiet` runs even on a terminal, get
 `{"ok":false,"command":...,"error":{"kind":...,"message":...}}` on
 stdout — for runtime errors and usage errors alike (usage errors also
-print the usage text on stderr); TTY → plain message on stderr. Exit
+print the usage text on stderr); a plain terminal run gets the plain
+message on stderr. Exit
 codes: `0` success · `1` runtime/API
 error · `2` usage error.
 

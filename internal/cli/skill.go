@@ -68,9 +68,11 @@ func runSkill(args []string, s Streams) int {
 	})
 }
 
-// writeFileAtomic writes data to a temp file inside the target directory
-// and renames it into place, so an interrupted install can never leave a
-// truncated SKILL.md behind; the temp file is cleaned up on any failure.
+// writeFileAtomic writes data to a temp file inside the target directory,
+// flushes it to disk and renames it into place, so an interrupted install
+// can never leave a truncated SKILL.md behind — and a crash right after
+// the rename cannot leave an empty one; the temp file is cleaned up on
+// any failure.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
@@ -79,6 +81,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	name := tmp.Name()
 	defer func() { _ = os.Remove(name) }()
 	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -26,11 +27,11 @@ func runList(ctx context.Context, args []string, s Streams) int {
 		return code
 	}
 	f := cmd.flags
-	org := resolveSetting(f.getString("org"), "SNYK_ORG_ID")
+	org := resolveSetting(f.getString("org"), "SNYK_ORG_ID", os.Getenv)
 	if org == "" {
 		return usageError(s, args, issuesListSpec.Name, "--org is required (or set SNYK_ORG_ID)")
 	}
-	project := resolveSetting(f.getString("project"), "SNYK_PROJECT_ID")
+	project := resolveSetting(f.getString("project"), "SNYK_PROJECT_ID", os.Getenv)
 	if project == "" {
 		return usageError(s, args, issuesListSpec.Name, "--project is required (or set SNYK_PROJECT_ID)")
 	}
@@ -48,7 +49,7 @@ func runList(ctx context.Context, args []string, s Streams) int {
 	if err != nil {
 		return usageError(s, args, issuesListSpec.Name, err.Error())
 	}
-	client, code, ok := snykClient(s, args, issuesListSpec.Name)
+	client, code, ok := snykClient(s, args, issuesListSpec.Name, os.Getenv)
 	if !ok {
 		return code
 	}
@@ -90,7 +91,7 @@ func runList(ctx context.Context, args []string, s Streams) int {
 // tokens are trimmed and lowercased, duplicates dropped, order preserved. An
 // empty value means "no filter". Unknown or empty tokens are rejected so
 // invalid input fails fast with a usage error instead of an API round-trip.
-func normalizeList(value string, allowed []string, flag string) ([]string, error) {
+func normalizeList(value string, allowed []string, name string) ([]string, error) {
 	if strings.TrimSpace(value) == "" {
 		return nil, nil
 	}
@@ -99,10 +100,10 @@ func normalizeList(value string, allowed []string, flag string) ([]string, error
 	for _, tok := range strings.Split(value, ",") {
 		tok = strings.ToLower(strings.TrimSpace(tok))
 		if tok == "" {
-			return nil, fmt.Errorf("empty value in --%s", flag)
+			return nil, fmt.Errorf("empty value in --%s", name)
 		}
 		if !slices.Contains(allowed, tok) {
-			return nil, fmt.Errorf("invalid --%s value %q; allowed: %s", flag, tok, strings.Join(allowed, ","))
+			return nil, fmt.Errorf("invalid --%s value %q; allowed: %s", name, tok, strings.Join(allowed, ","))
 		}
 		if !seen[tok] {
 			seen[tok] = true

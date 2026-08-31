@@ -41,11 +41,17 @@ type commandSpec struct {
 	Examples []string   `json:"examples,omitempty"`
 }
 
+// jsonFlag is the --json spec shared by every command with a machine-
+// readable output mode; only its home in each flag list varies.
+func jsonFlag() flagSpec {
+	return flagSpec{Name: "--json", Bool: true, Description: "force JSON envelope output"}
+}
+
 // outputFlags are the output-mode flags shared by every command that emits
 // a payload.
 func outputFlags() []flagSpec {
 	return []flagSpec{
-		{Name: "--json", Bool: true, Description: "force JSON envelope output"},
+		jsonFlag(),
 		{Name: "--quiet", Bool: true, Description: "print data only, no envelope"},
 	}
 }
@@ -85,7 +91,7 @@ var (
 			{Name: "--global", Bool: true, Description: "install to ~/.agents/skills (default: ./.agents/skills in the current directory)"},
 			{Name: "--dir", Description: "install into the given directory instead"},
 			{Name: "--print", Bool: true, Description: "print the embedded SKILL.md to stdout"},
-			{Name: "--json", Bool: true, Description: "force JSON envelope output"},
+			jsonFlag(),
 		},
 		Examples: []string{
 			"snyk skill install --global",
@@ -102,9 +108,12 @@ var (
 		Examples: []string{"snyk help", "snyk help --json"},
 	}
 	versionSpec = commandSpec{
-		Name:     "version",
-		Summary:  "Print version (aliases: -v, --version)",
-		Examples: []string{"snyk version"},
+		Name:    "version",
+		Summary: "Print version (aliases: -v, --version)",
+		Flags: []flagSpec{
+			jsonFlag(),
+		},
+		Examples: []string{"snyk version", "snyk version --json"},
 	}
 )
 

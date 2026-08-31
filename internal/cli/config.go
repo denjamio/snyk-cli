@@ -2,19 +2,22 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/denjamio/snyk-cli/internal/snyk"
 )
 
+// envLookup abstracts environment access: os.Getenv in production,
+// injected in tests that should not touch the process environment.
+type envLookup func(string) string
+
 // resolveSetting applies CLI-over-env precedence: the flag value wins when
 // set, otherwise the named environment variable is used ("" if unset).
-func resolveSetting(flagValue, envKey string) string {
+func resolveSetting(flagValue, envKey string, getenv envLookup) string {
 	if flagValue != "" {
 		return flagValue
 	}
-	return os.Getenv(envKey)
+	return getenv(envKey)
 }
 
 // snykClient builds the API client from the environment — the one place
@@ -22,15 +25,15 @@ func resolveSetting(flagValue, envKey string) string {
 // (runtime error); SNYK_HTTP_TIMEOUT optionally bounds each HTTP request
 // and must be a positive Go duration (invalid values are usage errors).
 // When ok is false the second result is the exit code to return.
-func snykClient(s Streams, args []string, command string) (*snyk.Client, int, bool) {
-	token := os.Getenv("SNYK_TOKEN")
+func snykClient(s Streams, args []string, command string, getenv envLookup) (*snyk.Client, int, bool) {
+	token := getenv("SNYK_TOKEN")
 	if token == "" {
 		return nil, runtimeError(s, args, command, kindConfig, "SNYK_TOKEN not set"), false
 	}
-	client := snyk.NewClient(token, os.Getenv("SNYK_API_URL"))
+	client := snyk.NewClient(token, getenv("SNYK_API_URL"))
 	client.UserAgent = "snyk-cli/" + Version
 	client.Progress = progressLogger(s)
-	if v := os.Getenv("SNYK_HTTP_TIMEOUT"); v != "" {
+	if v := getenv("SNYK_HTTP_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
 			return nil, usageError(s, args, command, "invalid SNYK_HTTP_TIMEOUT: must be a positive duration like 90s or 2m"), false

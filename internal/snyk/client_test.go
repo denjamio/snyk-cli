@@ -296,12 +296,24 @@ func TestRetryAfterHTTPDateInsideCap(t *testing.T) {
 	}
 }
 
-func TestTransientRetryDelayCap(t *testing.T) {
-	if got := transientRetryDelay(50); got != 2*time.Second {
-		t.Errorf("transientRetryDelay(50) = %v, want cap 2s", got)
+// Full-jitter exponential backoff: only the [0, cap) window is pinned,
+// since the point of jitter is that the wait is random.
+func TestTransientRetryDelay(t *testing.T) {
+	cases := []struct {
+		attempt int
+		cap     time.Duration
+	}{
+		{0, 250 * time.Millisecond},
+		{1, 500 * time.Millisecond},
+		{2, time.Second},
+		{3, 2 * time.Second},
+		{50, 2 * time.Second},
 	}
-	if got := transientRetryDelay(0); got != 250*time.Millisecond {
-		t.Errorf("transientRetryDelay(0) = %v, want 250ms", got)
+	for _, c := range cases {
+		got := transientRetryDelay(c.attempt)
+		if got < 0 || got >= c.cap {
+			t.Errorf("transientRetryDelay(%d) = %v, want a wait in [0, %v)", c.attempt, got, c.cap)
+		}
 	}
 }
 
@@ -437,6 +449,60 @@ func TestGet429ExhaustsRetries(t *testing.T) {
 	}
 	if attempts != MaxRetries+1 {
 		t.Fatalf("attempts = %d, want %d", attempts, MaxRetries+1)
+	}
+}
+
+// The retry budget caps the cumulative wait: a hostile Retry-After that
+// would exceed it fails fast with the typed rate_limit error instead of
+// stalling the request — and without ever sleeping, since the check runs
+// before the wait.
+func TestRetryBudgetExhaustsOnHostileRetryAfter(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	c.RetryBudget = 500 * time.Millisecond
+	_, err := c.Get(context.Background(), "o", "x")
+	if err == nil || !strings.Contains(err.Error(), "retry budget exhausted") {
+		t.Fatalf("err = %v, want the budget error", err)
+	}
+	if got := kindOf(t, err); got != KindRateLimit {
+		t.Fatalf("kind = %q, want %q", got, KindRateLimit)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (budget trips before the first wait)", attempts)
+	}
+}
+
+// A budget within reach lets retries proceed normally: waits that fit do
+// not trip it, and the run succeeds.
+func TestRetryBudgetAccommodatesSmallWaits(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Retry-After", "0")
+		if attempts == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":{"id":"x","attributes":{"title":"T","type":"code","effective_severity_level":"low","status":"open","ignored":false}}}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	c.RetryBudget = 30 * time.Second
+	raw, err := c.Get(context.Background(), "o", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || raw.ID != "x" {
+		t.Fatalf("attempts = %d, id = %q", attempts, raw.ID)
 	}
 }
 

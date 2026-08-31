@@ -1166,6 +1166,31 @@ func TestVersionAliases(t *testing.T) {
 	}
 }
 
+// version --json routes the version through the standard envelope, so
+// agents read it without parsing prose.
+func TestVersionJSON(t *testing.T) {
+	for _, args := range [][]string{{"version", "--json"}, {"--version", "--json"}} {
+		s, out, _ := newStreams()
+		if rc := Run(context.Background(), args, s); rc != 0 {
+			t.Fatalf("Run(%v) rc = %d", args, rc)
+		}
+		env := decodeEnvelope(t, out.Bytes())
+		if !env.OK || env.Command != "version" {
+			t.Fatalf("envelope = %+v", env)
+		}
+		data, _ := json.Marshal(env.Data)
+		var payload struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Version != Version {
+			t.Errorf("data.version = %q, want %q", payload.Version, Version)
+		}
+	}
+}
+
 func TestFlagMissingValueIsUsageError(t *testing.T) {
 	s, _, errOut := newStreams()
 	if rc := Run(context.Background(), []string{"issues", "list", "--severity"}, s); rc != 2 {
@@ -1190,6 +1215,38 @@ func FuzzFlagsFirst(f *testing.F) {
 		hasTerminator := slices.Contains(args, "--")
 		if total > len(args) || (!hasTerminator && total != len(args)) {
 			t.Fatalf("args not conserved: in=%d flags=%d pos=%d", len(args), len(flags), len(positional))
+		}
+	})
+}
+
+// FuzzNormalizeList pins the list-normalizer contract on arbitrary input:
+// a successful parse yields only allowed tokens, lowercased, deduplicated
+// and in input order; anything else is a rejection, never a panic.
+func FuzzNormalizeList(f *testing.F) {
+	for _, s := range []string{"", "high", "HIGH, low", "info,info", " , ", "critical,unknown", " medium "} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, value string) {
+		out, err := normalizeList(value, severities, "severity")
+		if err != nil {
+			return
+		}
+		lower := strings.ToLower(value)
+		prev := -1
+		seen := map[string]bool{}
+		for _, tok := range out {
+			if !slices.Contains(severities, tok) {
+				t.Fatalf("token %q not in the allowed set (input %q)", tok, value)
+			}
+			if seen[tok] {
+				t.Fatalf("duplicate token %q (input %q)", tok, value)
+			}
+			seen[tok] = true
+			at := strings.Index(lower, tok)
+			if at < prev {
+				t.Fatalf("tokens out of input order: %v (input %q)", out, value)
+			}
+			prev = at
 		}
 	})
 }

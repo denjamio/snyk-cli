@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,15 +15,21 @@ import (
 )
 
 const (
-	DefaultBaseURL   = "https://api.eu.snyk.io"
-	APIVersion       = "2026-03-25"
-	PageLimit        = 100
-	MaxPages         = 100
-	MaxRetries       = 5
-	httpTimeout      = 60 * time.Second
-	maxRetryWait     = 120 * time.Second
-	maxBodyBytes     = 10 << 20
-	defaultUserAgent = "snyk-cli"
+	DefaultBaseURL  = "https://api.eu.snyk.io"
+	APIVersion      = "2026-03-25"
+	PageLimit       = 100
+	MaxPages        = 100
+	MaxRetries      = 5
+	httpTimeout     = 60 * time.Second
+	maxRetryWait    = 120 * time.Second
+	retryBackoffCap = 2 * time.Second
+	// defaultRetryBudget caps the cumulative wait across the retries of
+	// one request (429 Retry-After waits included): without it, a hostile
+	// Retry-After could stall a single request for minutes on end
+	// (5 × 120s).
+	defaultRetryBudget = 2 * time.Minute
+	maxBodyBytes       = 10 << 20
+	defaultUserAgent   = "snyk-cli"
 	// DefaultStatus is the status filter applied when the caller does not
 	// override it: the query builder, the flag documentation and the
 	// envelope summary all read from this one constant.
@@ -41,6 +48,11 @@ type Client struct {
 	// path; the CLI wires it to stderr on interactive terminals only, so
 	// piped and --json output stay clean.
 	Progress func(event string)
+	// RetryBudget caps the cumulative wait across the retries of one
+	// request (429 Retry-After waits included): when the next wait would
+	// exceed it, the request fails with the matching typed kind. Zero
+	// applies defaultRetryBudget.
+	RetryBudget time.Duration
 }
 
 // NewClient returns a client for baseURL. An empty baseURL falls back to
@@ -189,6 +201,8 @@ func cloneValues(v url.Values) url.Values {
 
 func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 	var lastErr error
+	waited := time.Duration(0)
+	budget := c.retryBudget()
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
@@ -210,12 +224,15 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 			}
 			lastErr = fmt.Errorf("snyk api: %w", err)
 			if attempt < MaxRetries {
+				d := transientRetryDelay(attempt)
 				if c.Progress != nil {
-					c.Progress(networkRetryEvent(err, transientRetryDelay(attempt), attempt))
+					c.Progress(networkRetryEvent(err, d, attempt))
 				}
-				if err := sleepCtx(ctx, transientRetryDelay(attempt)); err != nil {
-					return nil, err
+				w, werr := retryWait(ctx, waited, d, budget, KindNetwork, "transport failure")
+				if werr != nil {
+					return nil, werr
 				}
+				waited = w
 				continue
 			}
 			return nil, &Error{Kind: KindNetwork, err: lastErr}
@@ -228,27 +245,62 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 		switch {
 		case resp.StatusCode == http.StatusTooManyRequests && attempt < MaxRetries:
 			lastErr = fmt.Errorf("snyk api: HTTP 429 rate limited")
+			d := retryAfter(resp.Header)
 			if c.Progress != nil {
-				c.Progress(retryEvent(resp.StatusCode, retryAfter(resp.Header), attempt))
+				c.Progress(retryEvent(resp.StatusCode, d, attempt))
 			}
-			if err := sleepCtx(ctx, retryAfter(resp.Header)); err != nil {
-				return nil, err
+			w, werr := retryWait(ctx, waited, d, budget, KindRateLimit, "HTTP 429 rate limited")
+			if werr != nil {
+				return nil, werr
 			}
+			waited = w
 		case isTransientStatus(resp.StatusCode) && attempt < MaxRetries:
 			lastErr = fmt.Errorf("snyk api: HTTP %d transient failure", resp.StatusCode)
+			d := transientRetryDelay(attempt)
 			if c.Progress != nil {
-				c.Progress(retryEvent(resp.StatusCode, transientRetryDelay(attempt), attempt))
+				c.Progress(retryEvent(resp.StatusCode, d, attempt))
 			}
-			if err := sleepCtx(ctx, transientRetryDelay(attempt)); err != nil {
-				return nil, err
+			w, werr := retryWait(ctx, waited, d, budget, KindTransient, fmt.Sprintf("HTTP %d transient failure", resp.StatusCode))
+			if werr != nil {
+				return nil, werr
 			}
+			waited = w
 		case resp.StatusCode != http.StatusOK:
 			return nil, apiError(resp.StatusCode, "snyk api %s: HTTP %d: %s", u, resp.StatusCode, bodySnippet(body))
 		default:
 			return body, nil
 		}
 	}
+	// Unreachable: every iteration returns or continues, and the final
+	// attempt always returns — the retry cases only continue while
+	// attempt < MaxRetries, so on the last one any non-200 falls through
+	// to apiError. The compiler still requires a terminating statement.
 	return nil, &Error{Kind: KindNetwork, err: lastErr}
+}
+
+// retryWait sleeps d before the next retry: when the cumulative wait
+// (waited, plus this one) would exceed budget, it fails fast with the
+// typed error for kind instead of sleeping — a hostile or unlucky run of
+// Retry-After values then surfaces as a rate_limit/transient/network
+// failure rather than a stalled request. When ctx is done (e.g. SIGINT)
+// the wait aborts; on success the updated cumulative total is returned.
+func retryWait(ctx context.Context, waited, d, budget time.Duration, kind Kind, cause string) (time.Duration, error) {
+	if waited+d > budget {
+		return 0, &Error{Kind: kind, err: fmt.Errorf("snyk api: %s: retry budget exhausted (%s waited across retries, cap %s)", cause, waited, budget)}
+	}
+	if err := sleepCtx(ctx, d); err != nil {
+		return 0, err
+	}
+	return waited + d, nil
+}
+
+// retryBudget returns the client's configured cumulative retry wait cap,
+// applying the default when unset.
+func (c *Client) retryBudget() time.Duration {
+	if c.RetryBudget > 0 {
+		return c.RetryBudget
+	}
+	return defaultRetryBudget
 }
 
 // readBody reads the response body capped at maxBodyBytes. The reader is
@@ -312,14 +364,15 @@ func networkRetryEvent(err error, wait time.Duration, attempt int) string {
 	return fmt.Sprintf("network error (%v), retrying in %s (attempt %d/%d)", err, wait, attempt+1, MaxRetries)
 }
 
-// transientRetryDelay returns the linear backoff (capped at 2s) applied
-// between retries of a transient 5xx failure.
+// transientRetryDelay returns the full-jitter exponential backoff applied
+// between retries of a transient failure: a random wait in
+// [0, min(250ms·2^attempt, retryBackoffCap)). Jitter keeps concurrent runs
+// and flapping upstreams from retrying in lockstep; the cap bounds each
+// wait, and the capped shift keeps the exponent from overflowing.
 func transientRetryDelay(attempt int) time.Duration {
-	d := time.Duration(attempt+1) * 250 * time.Millisecond
-	if d > 2*time.Second {
-		d = 2 * time.Second
-	}
-	return d
+	shift := min(attempt, 3) // 250ms, 500ms, 1s, then the cap
+	d := (250 * time.Millisecond) << uint(shift)
+	return time.Duration(rand.Int64N(int64(d)))
 }
 
 // retryAfter parses the Retry-After header: delta-seconds or HTTP-date

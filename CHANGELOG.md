@@ -8,6 +8,15 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Changed
 
+- Runtime errors now emit the structured failure envelope on a terminal
+  too when `--json`/`--quiet` was explicitly requested — the documented
+  contract, previously only held for usage errors; plain terminal runs
+  keep the plain stderr message, and piped runs stay silent on stderr.
+- Transient retries (502/503/504 and network-level errors) back off
+  exponentially with full jitter — a random wait in
+  `[0, min(250ms·2^attempt, 2s))` — instead of a fixed linear delay, so
+  concurrent runs no longer retry in lockstep; `429` `Retry-After` waits
+  are unchanged.
 - The failure envelope's `error` is now an object
   `{"kind": "...", "message": "..."}` instead of a plain string: scripts
   and agents branch on `kind` (`usage`, `config`, `auth`, `not_found`,
@@ -44,6 +53,9 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- `version --json`: the version through the standard
+  `{ok, command, data}` envelope (`data.version`), so agents read it
+  without parsing prose.
 - Transient retries now also cover network-level failures (connection
   refused or reset, timeouts, TLS handshake), not just HTTP 429/5xx
   statuses; the progress line names the transport error.
@@ -59,6 +71,8 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Fixed
 
+- `snyk skill install` fsyncs the skill file before the atomic rename, so
+  a crash right after the install cannot leave an empty `SKILL.md`.
 - The closed-payload guarantee now holds at leaf level too:
   `location`/`locations` entries always carry `file`, `start_line` and
   `commit_id`, and a group with no severity still serializes

@@ -140,8 +140,7 @@ func Run(ctx context.Context, args []string, s Streams) int {
 	case "help":
 		return runHelp(args[1:], s)
 	case "version", "--version", "-v":
-		fmt.Fprintln(s.Out, "snyk "+Version)
-		return 0
+		return runVersion(args[1:], s)
 	default:
 		return usageError(s, args, args[0], "unknown command: "+args[0])
 	}

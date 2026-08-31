@@ -45,7 +45,6 @@ type Attributes struct {
 type Class struct {
 	ID     string `json:"id,omitempty"`
 	Source string `json:"source,omitempty"`
-	Type   string `json:"type,omitempty"`
 }
 
 type Coordinate struct {
@@ -84,7 +83,6 @@ type FlowLocation struct {
 
 type Region struct {
 	Start Position `json:"start"`
-	End   Position `json:"end"`
 }
 
 type Remedy struct {
@@ -183,7 +181,9 @@ type ListData struct {
 // falling back to "unknown"). Group titles are unique by construction, so
 // groups are ordered alphabetically by type name — a total order; issues
 // inside each group by severity, then most recent created_at, with the
-// stable id as final tie-break.
+// stable id as final tie-break. Issues are copied into their group by
+// value; the copies are shallow — strings and slices share storage — so
+// the duplication cost is bounded and small.
 func GroupByType(items []Issue) []IssueGroup {
 	index := map[string]int{}
 	groups := make([]IssueGroup, 0, len(items))
@@ -210,7 +210,7 @@ func GroupByType(items []Issue) []IssueGroup {
 	slices.SortFunc(groups, func(a, b IssueGroup) int { return strings.Compare(a.Title, b.Title) })
 	for i := range groups {
 		g := &groups[i]
-		slices.SortFunc(g.Issues, issueCompare)
+		sortIssues(g.Issues)
 		g.ID = groupSlug(g.Title)
 	}
 	taken := map[string]bool{}
@@ -223,6 +223,47 @@ func GroupByType(items []Issue) []IssueGroup {
 		groups[i].ID = base
 	}
 	return groups
+}
+
+// issueSortKey pairs an issue with its created_at parsed once, so the
+// in-group sort does not re-parse the timestamp on every comparison.
+type issueSortKey struct {
+	issue Issue
+	t     time.Time
+	ok    bool
+}
+
+// sortIssues orders issues in place: severity first (critical before
+// info), then most recent created_at, with the stable id as final
+// tie-break — a total order on any input.
+func sortIssues(items []Issue) {
+	keys := make([]issueSortKey, len(items))
+	for i, it := range items {
+		keys[i] = issueSortKey{issue: it}
+		keys[i].t, keys[i].ok = parseTimestamp(it.CreatedAt)
+	}
+	slices.SortFunc(keys, func(a, b issueSortKey) int {
+		if ra, rb := severityRank(a.issue.Severity), severityRank(b.issue.Severity); ra != rb {
+			return rb - ra
+		}
+		switch {
+		case a.ok && b.ok:
+			switch {
+			case a.t.After(b.t):
+				return -1
+			case a.t.Before(b.t):
+				return 1
+			}
+		case a.ok:
+			return -1
+		case b.ok:
+			return 1
+		}
+		return strings.Compare(a.issue.ID, b.issue.ID)
+	})
+	for i := range keys {
+		items[i] = keys[i].issue
+	}
 }
 
 // groupSlug turns a group title into a deterministic identifier: lowercase,
@@ -449,38 +490,6 @@ func collectCWEs(problems []Problem, classes []Class) []string {
 	return out
 }
 
-// issueCompare defines the deterministic order inside each group: severity
-// first (critical before info), then most recent created_at, with the
-// stable id as final tie-break — a total order on any input.
-func issueCompare(a, b Issue) int {
-	if ra, rb := severityRank(a.Severity), severityRank(b.Severity); ra != rb {
-		return rb - ra
-	}
-	if c := compareCreatedDesc(a.CreatedAt, b.CreatedAt); c != 0 {
-		return c
-	}
-	return strings.Compare(a.ID, b.ID)
-}
-
-func compareCreatedDesc(a, b string) int {
-	ta, oka := parseTimestamp(a)
-	tb, okb := parseTimestamp(b)
-	switch {
-	case oka && okb:
-		switch {
-		case ta.After(tb):
-			return -1
-		case ta.Before(tb):
-			return 1
-		}
-	case oka:
-		return -1
-	case okb:
-		return 1
-	}
-	return 0
-}
-
 func parseTimestamp(s string) (time.Time, bool) {
 	if s == "" {
 		return time.Time{}, false
@@ -492,7 +501,7 @@ func parseTimestamp(s string) (time.Time, bool) {
 	return t, true
 }
 
-// SeverityRank maps a severity name to its rank (higher = worse). Unknown
+// severityRank maps a severity name to its rank (higher = worse). Unknown
 // values rank as info.
 func severityRank(severity string) int {
 	switch severity {

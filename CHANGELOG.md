@@ -17,10 +17,17 @@ versioning follows [SemVer](https://semver.org/).
 - The API base URL (`SNYK_API_URL`) is resolved in the CLI layer and
   injected into the client; the client package no longer reads the
   environment.
+- The human usage text is generated from the command catalog that also
+  backs `help --json`, so the two help surfaces cannot drift apart.
 
 ### Added
 
 - Fuzz tests for the flag pre-parser and the group slug generator.
+
+### Fixed
+
+- `snyk skill install` writes `SKILL.md` atomically (temp file + rename);
+  an interrupted install can no longer leave a truncated file behind.
 
 ## [0.1.0] - 2026-08-29
 

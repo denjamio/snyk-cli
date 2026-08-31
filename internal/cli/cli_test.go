@@ -71,15 +71,15 @@ func TestHelpJSONCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	var parsed struct {
-		Commands []commandDoc `json:"commands"`
+		Commands []commandSpec `json:"commands"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed.Commands) != 4 {
-		t.Fatalf("commands = %d, want 4", len(parsed.Commands))
+	if len(parsed.Commands) != 5 {
+		t.Fatalf("commands = %d, want 5", len(parsed.Commands))
 	}
-	var listDoc commandDoc
+	var listDoc commandSpec
 	for _, c := range parsed.Commands {
 		if c.Name == "issues list" {
 			listDoc = c
@@ -247,14 +247,14 @@ func startMockSnyk(t *testing.T) *httptest.Server {
 		requests++
 		w.Header().Set("Content-Type", "application/vnd.api+json")
 		if requests == 1 {
-			fmtFprint(w, page1())
+			fmt.Fprint(w, page1())
 			return
 		}
-		fmtFprint(w, page2)
+		fmt.Fprint(w, page2)
 	})
 	mux.HandleFunc("/rest/orgs/o/issues/c", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/vnd.api+json")
-		fmtFprint(w, detailC)
+		fmt.Fprint(w, detailC)
 	})
 
 	srv = httptest.NewServer(mux)
@@ -263,10 +263,6 @@ func startMockSnyk(t *testing.T) *httptest.Server {
 	t.Setenv("SNYK_TOKEN", "test-token")
 	t.Setenv("SNYK_API_URL", srv.URL)
 	return srv
-}
-
-func fmtFprint(w http.ResponseWriter, s string) {
-	_, _ = w.Write([]byte(s))
 }
 
 func TestListQuietOutputsBareGroupsArray(t *testing.T) {

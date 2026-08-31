@@ -158,7 +158,7 @@ func TestGetFailsAfterExhaustedTransientRetries(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error")
 	}
-	if !containsAll(err.Error(), "HTTP 502") {
+	if !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("err = %v", err)
 	}
 	if attempts != MaxRetries+1 {
@@ -216,7 +216,7 @@ func TestListDecodeError(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
-	if err == nil || !containsAll(err.Error(), "decode list response") {
+	if err == nil || !strings.Contains(err.Error(), "decode list response") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -228,7 +228,7 @@ func TestGetDecodeError(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newTestClient(srv).Get(context.Background(), "o", "x")
-	if err == nil || !containsAll(err.Error(), "decode issue response") {
+	if err == nil || !strings.Contains(err.Error(), "decode issue response") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -242,7 +242,7 @@ func TestListMaxPagesGuard(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
-	if err == nil || !containsAll(err.Error(), fmt.Sprintf("pagination exceeded %d pages", MaxPages)) {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("pagination exceeded %d pages", MaxPages)) {
 		t.Fatalf("err = %v", err)
 	}
 	if requests != MaxPages {
@@ -275,7 +275,7 @@ func TestGetReturnsAPIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error")
 	}
-	if !containsAll(err.Error(), "HTTP 401", "bad token") {
+	if !strings.Contains(err.Error(), "HTTP 401") || !strings.Contains(err.Error(), "bad token") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -290,7 +290,7 @@ func TestGet429ExhaustsRetries(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newTestClient(srv).Get(context.Background(), "o", "x")
-	if err == nil || !containsAll(err.Error(), "HTTP 429") {
+	if err == nil || !strings.Contains(err.Error(), "HTTP 429") {
 		t.Fatalf("err = %v", err)
 	}
 	if attempts != MaxRetries+1 {
@@ -313,7 +313,7 @@ func TestGetContextCanceledDuringRetrySleep(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newTestClient(srv).Get(ctx, "o", "x")
-	if err == nil || !containsAll(err.Error(), "context canceled") {
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("err = %v, want context canceled", err)
 	}
 	if attempts != 1 {
@@ -328,7 +328,7 @@ func TestResponseBodyOverLimitIsRejected(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newTestClient(srv).Get(context.Background(), "o", "x")
-	if err == nil || !containsAll(err.Error(), "response body exceeds") {
+	if err == nil || !strings.Contains(err.Error(), "response body exceeds") {
 		t.Fatalf("err = %v, want over-limit rejection", err)
 	}
 }
@@ -342,7 +342,7 @@ func TestResponseBodyReadErrorIsPropagated(t *testing.T) {
 	defer srv.Close()
 
 	_, err := newTestClient(srv).Get(context.Background(), "o", "x")
-	if err == nil || !containsAll(err.Error(), "read response body") {
+	if err == nil || !strings.Contains(err.Error(), "read response body") {
 		t.Fatalf("err = %v, want read error propagated", err)
 	}
 }
@@ -363,7 +363,7 @@ func TestListContextCanceledFailsFast(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if err == nil || !stringContains(err.Error(), "context canceled") {
+		if err == nil || !strings.Contains(err.Error(), "context canceled") {
 			t.Fatalf("err = %v, want context canceled", err)
 		}
 	case <-time.After(3 * time.Second):
@@ -395,7 +395,7 @@ func TestListDoesNotMutateCallerQuery(t *testing.T) {
 func TestBuildListQuery(t *testing.T) {
 	t.Run("empty project ID is rejected", func(t *testing.T) {
 		_, err := BuildListQuery(ListOptions{})
-		if err == nil || !containsAll(err.Error(), "project ID") {
+		if err == nil || !strings.Contains(err.Error(), "project ID") {
 			t.Fatalf("err = %v, want project ID required", err)
 		}
 	})
@@ -444,26 +444,4 @@ func assertParam(t *testing.T, q url.Values, key, want string) {
 	if got := q.Get(key); got != want {
 		t.Errorf("%s = %q, want %q", key, got, want)
 	}
-}
-
-func containsAll(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if !stringContains(s, sub) {
-			return false
-		}
-	}
-	return true
-}
-
-func stringContains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

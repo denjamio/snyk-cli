@@ -35,85 +35,6 @@ func NewOSStreams() Streams {
 	return Streams{Out: os.Stdout, Err: os.Stderr, OutIsTTY: output.IsTTY(os.Stdout)}
 }
 
-type flagDoc struct {
-	Name        string `json:"name"`
-	Default     string `json:"default,omitempty"`
-	Description string `json:"description"`
-}
-
-type commandDoc struct {
-	Name     string    `json:"name"`
-	Summary  string    `json:"summary"`
-	Flags    []flagDoc `json:"flags,omitempty"`
-	Examples []string  `json:"examples,omitempty"`
-}
-
-func catalog() []commandDoc {
-	return []commandDoc{
-		{
-			Name:    "issues list",
-			Summary: "List issues of a project, grouped by vulnerability type",
-			Flags: []flagDoc{
-				{Name: "--org", Description: "Snyk organization ID (required; or env SNYK_ORG_ID)"},
-				{Name: "--project", Description: "Project ID (required; or env SNYK_PROJECT_ID)"},
-				{Name: "--severity", Default: "all", Description: "comma-separated: info,low,medium,high,critical"},
-				{Name: "--status", Default: "open", Description: "comma-separated: open,resolved"},
-				{Name: "--created-after", Description: "RFC3339 date-time, e.g. 2026-08-01T00:00:00Z (only issues created after)"},
-				{Name: "--include-ignored", Default: "false", Description: "include ignored issues"},
-				{Name: "--include-code-flows", Default: "false", Description: "include data flows (source to sink) for code issues"},
-				{Name: "--json", Description: "force JSON envelope output"},
-				{Name: "--quiet", Description: "print data only, no envelope"},
-			},
-			Examples: []string{
-				"snyk issues list --org ORG_ID",
-				"snyk issues list --org ORG_ID --severity high,critical --json",
-			},
-		},
-		{
-			Name:    "issues get",
-			Summary: "Get a single issue with full detail",
-			Flags: []flagDoc{
-				{Name: "--org", Description: "Snyk organization ID (required; or env SNYK_ORG_ID)"},
-				{Name: "ISSUE_ID", Description: "Snyk issue UUID (positional argument, order-independent)"},
-				{Name: "--json", Description: "force JSON envelope output"},
-				{Name: "--quiet", Description: "print data only, no envelope"},
-			},
-			Examples: []string{"snyk issues get ISSUE_ID --org ORG_ID --json"},
-		},
-		{
-			Name:    "skill",
-			Summary: "Install or print the embedded agent skill (SKILL.md)",
-			Flags: []flagDoc{
-				{Name: "install", Description: "optional positional action; bare `skill` also installs"},
-				{Name: "--global", Description: "install to ~/.agents/skills (default: ./.agents/skills in the current directory)"},
-				{Name: "--dir PATH", Description: "install into the given directory instead"},
-				{Name: "--print", Description: "print the embedded SKILL.md to stdout"},
-				{Name: "--json", Description: "force JSON envelope output"},
-			},
-			Examples: []string{
-				"snyk skill install --global",
-				"snyk skill install",
-				"snyk skill --print",
-			},
-		},
-		{
-			Name:     "version",
-			Summary:  "Print version",
-			Examples: []string{"snyk version"},
-		},
-	}
-}
-
-var booleanFlags = map[string]bool{
-	"json":               true,
-	"quiet":              true,
-	"include-ignored":    true,
-	"include-code-flows": true,
-	"help":               true,
-	"global":             true,
-	"print":              true,
-}
-
 func flagsFirst(args []string) ([]string, []string) {
 	var flags, positional []string
 	for i := 0; i < len(args); i++ {
@@ -135,6 +56,49 @@ func flagsFirst(args []string) ([]string, []string) {
 		positional = append(positional, a)
 	}
 	return flags, positional
+}
+
+// boundFlags gives typed access to the flags bound from a command spec.
+type boundFlags struct {
+	strFlags  map[string]*string
+	boolFlags map[string]*bool
+}
+
+// bind registers every non-positional entry of specs on fs. Value flags
+// default to "" (unset) and boolean flags to false; the spec's Default is
+// documentation, applied by the command logic afterwards. Lookups for
+// unknown names return zero values so a spec/handler mismatch can never
+// crash the CLI.
+func bind(fs *flag.FlagSet, specs []flagSpec) *boundFlags {
+	b := &boundFlags{strFlags: map[string]*string{}, boolFlags: map[string]*bool{}}
+	for _, sp := range specs {
+		if sp.Positional {
+			continue
+		}
+		name := strings.TrimLeft(sp.Name, "-")
+		if sp.Bool {
+			b.boolFlags[name] = fs.Bool(name, false, sp.usage())
+		} else {
+			b.strFlags[name] = fs.String(name, "", sp.usage())
+		}
+	}
+	return b
+}
+
+// str returns the value of a bound string flag ("" when unset or unknown).
+func (b *boundFlags) str(name string) string {
+	if p, ok := b.strFlags[name]; ok {
+		return *p
+	}
+	return ""
+}
+
+// boolean returns the value of a bound bool flag (false when unset or unknown).
+func (b *boundFlags) boolean(name string) bool {
+	if p, ok := b.boolFlags[name]; ok {
+		return *p
+	}
+	return false
 }
 
 func Run(ctx context.Context, args []string, s Streams) int {
@@ -173,8 +137,8 @@ func runIssues(ctx context.Context, args []string, s Streams) int {
 }
 
 func runHelp(args []string, s Streams) int {
-	fs := newFlagSet("help")
-	jsonFlag := fs.Bool("json", false, "print the machine-readable command catalog")
+	fs := newFlagSet(helpSpec.Name)
+	f := bind(fs, helpSpec.Flags)
 	flagArgs, positional := flagsFirst(args)
 	if code, ok := parseFS(fs, flagArgs, s); !ok {
 		return code
@@ -182,7 +146,7 @@ func runHelp(args []string, s Streams) int {
 	if len(positional) > 0 {
 		return usageError(s, fmt.Sprintf("unexpected argument %q; help takes no positional arguments", positional[0]))
 	}
-	if !*jsonFlag {
+	if !f.boolean("json") {
 		printUsage(s.Out)
 		return 0
 	}
@@ -207,16 +171,8 @@ func resolveSetting(flagValue, envKey string) string {
 }
 
 func runList(ctx context.Context, args []string, s Streams) int {
-	fs := newFlagSet("issues list")
-	orgFlag := fs.String("org", "", "Snyk organization ID (required; or env SNYK_ORG_ID)")
-	projectFlag := fs.String("project", "", "Project ID (required; or env SNYK_PROJECT_ID)")
-	severity := fs.String("severity", "", "comma-separated: info,low,medium,high,critical (default: all)")
-	status := fs.String("status", "", "comma-separated: open,resolved (default: open)")
-	createdAfter := fs.String("created-after", "", "RFC3339 date-time, e.g. 2026-08-01T00:00:00Z (only issues created after)")
-	includeIgnored := fs.Bool("include-ignored", false, "include ignored issues")
-	includeCodeFlows := fs.Bool("include-code-flows", false, "include data flows (source to sink) for code issues; heavier payload")
-	jsonFlag := fs.Bool("json", false, "force JSON envelope output")
-	quietFlag := fs.Bool("quiet", false, "print data only, no envelope")
+	fs := newFlagSet(issuesListSpec.Name)
+	f := bind(fs, issuesListSpec.Flags)
 	flagArgs, positional := flagsFirst(args)
 	if code, ok := parseFS(fs, flagArgs, s); !ok {
 		return code
@@ -224,24 +180,25 @@ func runList(ctx context.Context, args []string, s Streams) int {
 	if len(positional) > 0 {
 		return usageError(s, fmt.Sprintf("unexpected argument %q; issues list takes no positional arguments", positional[0]))
 	}
-	org := resolveSetting(*orgFlag, "SNYK_ORG_ID")
+	org := resolveSetting(f.str("org"), "SNYK_ORG_ID")
 	if org == "" {
 		return usageError(s, "--org is required (or set SNYK_ORG_ID)")
 	}
-	project := resolveSetting(*projectFlag, "SNYK_PROJECT_ID")
+	project := resolveSetting(f.str("project"), "SNYK_PROJECT_ID")
 	if project == "" {
 		return usageError(s, "--project is required (or set SNYK_PROJECT_ID)")
 	}
-	if *createdAfter != "" {
-		if _, err := time.Parse(time.RFC3339, *createdAfter); err != nil {
+	createdAfter := f.str("created-after")
+	if createdAfter != "" {
+		if _, err := time.Parse(time.RFC3339, createdAfter); err != nil {
 			return usageError(s, "invalid --created-after: must be an RFC3339 date-time like 2026-08-01T00:00:00Z")
 		}
 	}
-	sevToks, err := normalizeList(*severity, severities, "severity")
+	sevToks, err := normalizeList(f.str("severity"), severities, "severity")
 	if err != nil {
 		return usageError(s, err.Error())
 	}
-	statusToks, err := normalizeList(*status, statuses, "status")
+	statusToks, err := normalizeList(f.str("status"), statuses, "status")
 	if err != nil {
 		return usageError(s, err.Error())
 	}
@@ -253,10 +210,10 @@ func runList(ctx context.Context, args []string, s Streams) int {
 	query, err := snyk.BuildListQuery(snyk.ListOptions{
 		Severity:         strings.Join(sevToks, ","),
 		Status:           strings.Join(statusToks, ","),
-		IncludeIgnored:   *includeIgnored,
+		IncludeIgnored:   f.boolean("include-ignored"),
 		ProjectID:        project,
-		CreatedAfter:     *createdAfter,
-		IncludeCodeFlows: *includeCodeFlows,
+		CreatedAfter:     createdAfter,
+		IncludeCodeFlows: f.boolean("include-code-flows"),
 	})
 	if err != nil {
 		return runtimeError(s, "issues list", err.Error())
@@ -267,12 +224,12 @@ func runList(ctx context.Context, args []string, s Streams) int {
 	}
 	items := snyk.NormalizeAll(raw)
 	groups := snyk.GroupByType(items)
-	mode := output.ResolveMode(*jsonFlag, *quietFlag)
+	mode := output.ResolveMode(f.boolean("json"), f.boolean("quiet"))
 	var data any = snyk.ListData{TotalIssues: len(items), Groups: groups}
 	if mode == output.ModeQuiet {
 		data = groups
 	}
-	summary := summarize(len(items), strings.Join(statusToks, ","), *includeIgnored, strings.Join(sevToks, ","), *createdAfter)
+	summary := summarize(len(items), strings.Join(statusToks, ","), f.boolean("include-ignored"), strings.Join(sevToks, ","), createdAfter)
 	return emit(s, mode, "issues list", summary, data, func(w io.Writer) {
 		output.RenderGroupsTable(w, groups, summary)
 	})
@@ -305,10 +262,8 @@ func normalizeList(value string, allowed []string, flag string) ([]string, error
 }
 
 func runGet(ctx context.Context, args []string, s Streams) int {
-	fs := newFlagSet("issues get")
-	orgFlag := fs.String("org", "", "Snyk organization ID (required; or env SNYK_ORG_ID)")
-	jsonFlag := fs.Bool("json", false, "force JSON envelope output")
-	quietFlag := fs.Bool("quiet", false, "print data only, no envelope")
+	fs := newFlagSet(issuesGetSpec.Name)
+	f := bind(fs, issuesGetSpec.Flags)
 	flagArgs, positional := flagsFirst(args)
 	if code, ok := parseFS(fs, flagArgs, s); !ok {
 		return code
@@ -316,7 +271,7 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 	if len(positional) != 1 {
 		return usageError(s, "exactly one ISSUE_ID argument is required")
 	}
-	org := resolveSetting(*orgFlag, "SNYK_ORG_ID")
+	org := resolveSetting(f.str("org"), "SNYK_ORG_ID")
 	if org == "" {
 		return usageError(s, "--org is required (or set SNYK_ORG_ID)")
 	}
@@ -330,7 +285,7 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 		return runtimeError(s, "issues get", err.Error())
 	}
 	item := snyk.Normalize(*raw)
-	mode := output.ResolveMode(*jsonFlag, *quietFlag)
+	mode := output.ResolveMode(f.boolean("json"), f.boolean("quiet"))
 	return emit(s, mode, "issues get", "1 issue", item, func(w io.Writer) {
 		output.RenderIssuesTable(w, []snyk.Issue{item}, "1 issue")
 	})
@@ -341,11 +296,8 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 // ./.agents/skills in the current project; --global targets ~/.agents and
 // --dir overrides both. --print emits the raw markdown instead.
 func runSkill(args []string, s Streams) int {
-	fs := newFlagSet("skill")
-	jsonFlag := fs.Bool("json", false, "force JSON envelope output")
-	global := fs.Bool("global", false, "install to ~/.agents/skills (default: ./.agents/skills in the current directory)")
-	dir := fs.String("dir", "", "install into the given directory instead")
-	printFlag := fs.Bool("print", false, "print the embedded SKILL.md to stdout")
+	fs := newFlagSet(skillSpec.Name)
+	f := bind(fs, skillSpec.Flags)
 	flagArgs, positional := flagsFirst(args)
 	if code, ok := parseFS(fs, flagArgs, s); !ok {
 		return code
@@ -355,8 +307,10 @@ func runSkill(args []string, s Streams) int {
 			return usageError(s, fmt.Sprintf("unexpected argument %q; only the optional action install is accepted", p))
 		}
 	}
-	if *printFlag {
-		if *global || *dir != "" {
+	dir := f.str("dir")
+	global := f.boolean("global")
+	if f.boolean("print") {
+		if global || dir != "" {
 			return usageError(s, "--print cannot be combined with a destination")
 		}
 		fmt.Fprint(s.Out, embedded.SkillMD)
@@ -364,9 +318,9 @@ func runSkill(args []string, s Streams) int {
 	}
 	base := ""
 	switch {
-	case *dir != "":
-		base = *dir
-	case *global:
+	case dir != "":
+		base = dir
+	case global:
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return runtimeError(s, "skill", err.Error())
@@ -390,7 +344,7 @@ func runSkill(args []string, s Streams) int {
 		return runtimeError(s, "skill", err.Error())
 	}
 	summary := fmt.Sprintf("skill %s at %s", action, target)
-	mode := output.ResolveMode(*jsonFlag, false)
+	mode := output.ResolveMode(f.boolean("json"), false)
 	return emit(s, mode, "skill", summary, map[string]any{"path": target}, func(w io.Writer) {
 		fmt.Fprintln(w, summary)
 	})
@@ -419,7 +373,9 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(name, path)
 }
 
-func parseFS(fs *flag.FlagSet, args []string, s Streams) (int, bool) {
+// parseFS parses pre-split flag args, mapping flag package errors to exit
+// codes: --help exits cleanly (0, false), anything else is a usage error.
+func parseFS(fs *flag.FlagSet, args []string, s Streams) (code int, ok bool) {
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return 0, false
@@ -448,6 +404,7 @@ func emit(s Streams, mode output.Mode, command, summary string, data any, render
 	return 0
 }
 
+// summarize renders the envelope summary line from the effective filters.
 func summarize(n int, statusFlag string, includeIgnored bool, severity, createdAfter string) string {
 	status := statusFlag
 	if status == "" {
@@ -457,14 +414,19 @@ func summarize(n int, statusFlag string, includeIgnored bool, severity, createdA
 	if includeIgnored {
 		ignored = "ignored=any"
 	}
-	out := fmt.Sprintf("%d issues · status=%s · %s · type=code", n, status, ignored)
+	parts := []string{
+		fmt.Sprintf("%d issues", n),
+		"status=" + status,
+		ignored,
+		"type=code",
+	}
 	if severity != "" {
-		out += fmt.Sprintf(" · severity=%s", severity)
+		parts = append(parts, "severity="+severity)
 	}
 	if createdAfter != "" {
-		out += fmt.Sprintf(" · created_after=%s", createdAfter)
+		parts = append(parts, "created_after="+createdAfter)
 	}
-	return out
+	return strings.Join(parts, " · ")
 }
 
 func runtimeError(s Streams, command, msg string) int {
@@ -486,72 +448,4 @@ func usageError(s Streams, msg string) int {
 
 func newFlagSet(name string) *flag.FlagSet {
 	return flag.NewFlagSet(name, flag.ContinueOnError)
-}
-
-// printUsage renders the human usage text. Flag blocks are generated from
-// the catalog, the same source as `help --json`, so the two help surfaces
-// cannot drift apart; only the conceptual sections (scope, grouping,
-// environment, exit codes) are written by hand.
-func printUsage(w io.Writer) {
-	var sb strings.Builder
-	sb.WriteString(`snyk <resource> [action] [flags]
-
-Resources:
-  issues    Snyk Code issues (actions: list, get)
-  skill     Install or print the embedded agent skill
-  help      Print usage (--json for structured catalog)
-  version   Print version
-
-Run "snyk help --json" for the machine-readable command catalog.
-`)
-	for _, c := range catalog() {
-		writeFlagsSection(&sb, c)
-	}
-	sb.WriteString(`
-Scope:
-  issues list always queries Snyk Code issues (type=code) of a single
-  project (scan_item.id); there is no --type flag and no cross-project
-  listing. The payload carries only fields the code payload provides.
-
-Grouping:
-  issues list groups issues by vulnerability type. Groups are ordered
-  alphabetically by type name; issues inside each group by severity, then
-  most recent created_at, with the stable id as final tie-break.
-
-Output modes:
-  terminal             Human-readable table
-  piped / --json       {"ok":true,"command":...,"summary":...,"data":...}
-  --quiet              Raw data only
-
-Environment:
-  SNYK_TOKEN           Required API token
-  SNYK_ORG_ID          Default for --org on issues list and issues get (flag wins)
-  SNYK_PROJECT_ID      Default for --project on issues list (flag wins)
-  SNYK_API_URL         Optional API base URL (default https://api.eu.snyk.io)
-
-Exit codes: 0 success · 1 runtime error · 2 usage error
-`)
-	fmt.Fprint(w, sb.String())
-}
-
-// writeFlagsSection renders one command's flag table: name column padded to
-// the widest entry, description appended with its default when present.
-func writeFlagsSection(sb *strings.Builder, c commandDoc) {
-	if len(c.Flags) == 0 {
-		return
-	}
-	fmt.Fprintf(sb, "\n%s flags:\n", c.Name)
-	width := 0
-	for _, f := range c.Flags {
-		if l := len(f.Name); l > width {
-			width = l
-		}
-	}
-	for _, f := range c.Flags {
-		desc := f.Description
-		if f.Default != "" {
-			desc += fmt.Sprintf(" (default: %s)", f.Default)
-		}
-		fmt.Fprintf(sb, "  %-*s  %s\n", width, f.Name, desc)
-	}
 }

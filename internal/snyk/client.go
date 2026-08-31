@@ -28,6 +28,11 @@ type Client struct {
 	Token   string
 	BaseURL string
 	HTTP    *http.Client
+	// Progress, when set, receives one-line operational events (pagination
+	// pages, retry waits). It is called synchronously from the request
+	// path; the CLI wires it to stderr on interactive terminals only, so
+	// piped and --json output stay clean.
+	Progress func(event string)
 }
 
 // NewClient returns a client for baseURL. An empty baseURL falls back to
@@ -115,6 +120,9 @@ func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]Ra
 			return nil, fmt.Errorf("decode list response: %w", err)
 		}
 		out = append(out, p.Data...)
+		if c.Progress != nil {
+			c.Progress(pageEvent(len(p.Data), page+1))
+		}
 		next = c.absoluteURL(p.Links.Next)
 		if n := c.absoluteURL(p.Meta.Links.Next); next == "" {
 			next = n
@@ -184,11 +192,17 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 		switch {
 		case resp.StatusCode == http.StatusTooManyRequests && attempt < MaxRetries:
 			lastErr = fmt.Errorf("snyk api: HTTP 429 rate limited")
+			if c.Progress != nil {
+				c.Progress(retryEvent(resp.StatusCode, retryAfter(resp.Header), attempt))
+			}
 			if err := sleepCtx(ctx, retryAfter(resp.Header)); err != nil {
 				return nil, err
 			}
 		case isTransientStatus(resp.StatusCode) && attempt < MaxRetries:
 			lastErr = fmt.Errorf("snyk api: HTTP %d transient failure", resp.StatusCode)
+			if c.Progress != nil {
+				c.Progress(retryEvent(resp.StatusCode, transientRetryDelay(attempt), attempt))
+			}
 			if err := sleepCtx(ctx, transientRetryDelay(attempt)); err != nil {
 				return nil, err
 			}
@@ -240,6 +254,21 @@ func isTransientStatus(code int) bool {
 		code == http.StatusGatewayTimeout
 }
 
+// pageEvent renders the pagination progress line for one fetched page.
+func pageEvent(n, page int) string {
+	label := "issues"
+	if n == 1 {
+		label = "issue"
+	}
+	return fmt.Sprintf("page %d: %d %s", page, n, label)
+}
+
+// retryEvent renders the retry progress line for a rate-limit or transient
+// failure; attempt is 0-based, reported 1-based out of MaxRetries.
+func retryEvent(status int, wait time.Duration, attempt int) string {
+	return fmt.Sprintf("HTTP %d, retrying in %s (attempt %d/%d)", status, wait, attempt+1, MaxRetries)
+}
+
 // transientRetryDelay returns the linear backoff (capped at 2s) applied
 // between retries of a transient 5xx failure.
 func transientRetryDelay(attempt int) time.Duration {
@@ -264,7 +293,9 @@ func retryAfter(h http.Header) time.Duration {
 func bodySnippet(b []byte) string {
 	s := strings.TrimSpace(string(b))
 	if len(s) > 300 {
-		s = s[:300]
+		// The byte cut can split a UTF-8 sequence; drop any partial rune
+		// so error snippets never end malformed.
+		s = strings.ToValidUTF8(s[:300], "")
 	}
 	return s
 }

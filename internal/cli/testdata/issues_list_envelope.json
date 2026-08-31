@@ -1,0 +1,111 @@
+{
+  "ok": true,
+  "command": "issues list",
+  "summary": "3 issues · status=open · ignored=false · type=code",
+  "data": {
+    "total_issues": 3,
+    "groups": [
+      {
+        "id": "a-issue",
+        "severity": "critical",
+        "issues": [
+          {
+            "id": "a",
+            "key": "k1",
+            "title": "A issue",
+            "issue_type": "package_vulnerability",
+            "severity": "critical",
+            "status": "open",
+            "ignored": false,
+            "org_id": "o1",
+            "project_id": "p1",
+            "created_at": "",
+            "updated_at": "",
+            "description": "",
+            "remediation": null,
+            "risk_score": null,
+            "location": null,
+            "locations": [],
+            "cwes": [],
+            "introduced_at": "",
+            "last_resolved_at": "",
+            "last_resolved_details": "",
+            "fixable_manually": false,
+            "fixable_snyk": false,
+            "fixable_upstream": false,
+            "code_flows": [],
+            "code_flows_omitted": false
+          }
+        ]
+      },
+      {
+        "id": "b-issue",
+        "severity": "high",
+        "issues": [
+          {
+            "id": "b",
+            "key": "k2",
+            "title": "B issue",
+            "issue_type": "code",
+            "severity": "high",
+            "status": "open",
+            "ignored": false,
+            "org_id": "o1",
+            "project_id": "p1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "description": "desc-b",
+            "remediation": null,
+            "risk_score": null,
+            "location": null,
+            "locations": [],
+            "cwes": [],
+            "introduced_at": "",
+            "last_resolved_at": "",
+            "last_resolved_details": "",
+            "fixable_manually": false,
+            "fixable_snyk": false,
+            "fixable_upstream": false,
+            "code_flows": [],
+            "code_flows_omitted": false
+          }
+        ]
+      },
+      {
+        "id": "c-issue",
+        "severity": "medium",
+        "issues": [
+          {
+            "id": "c",
+            "key": "k3",
+            "title": "C issue",
+            "issue_type": "cloud",
+            "severity": "medium",
+            "status": "open",
+            "ignored": false,
+            "org_id": "o1",
+            "project_id": "",
+            "created_at": "",
+            "updated_at": "",
+            "description": "desc-c",
+            "remediation": {
+              "manual_steps": "Fix it"
+            },
+            "risk_score": null,
+            "location": null,
+            "locations": [],
+            "cwes": [],
+            "introduced_at": "",
+            "last_resolved_at": "",
+            "last_resolved_details": "",
+            "fixable_manually": false,
+            "fixable_snyk": false,
+            "fixable_upstream": false,
+            "code_flows": [],
+            "code_flows_omitted": false
+          }
+        ]
+      }
+    ]
+  }
+}

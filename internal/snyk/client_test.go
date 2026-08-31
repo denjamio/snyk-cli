@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func newTestClient(srv *httptest.Server) *Client {
@@ -121,6 +122,78 @@ func TestGetRetriesOn429(t *testing.T) {
 	}
 }
 
+func TestListReportsPaginationProgress(t *testing.T) {
+	requests := 0
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/rest/orgs/o/issues", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		if requests == 1 {
+			fmt.Fprintf(w, `{"data":[{"id":"a"},{"id":"b"}],"links":{"next":"%s/rest/orgs/o/issues?p=2"}}`, srv.URL)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"id":"c"}],"links":{}}`)
+	})
+
+	var events []string
+	c := newTestClient(srv)
+	c.Progress = func(event string) { events = append(events, event) }
+	if _, err := c.List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"})); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"page 1: 2 issues", "page 2: 1 issue"}
+	if len(events) != len(want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Errorf("event %d = %q, want %q", i, events[i], want[i])
+		}
+	}
+}
+
+func TestGetReportsRetryProgress(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Retry-After", "0")
+		if attempts == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, `{"data":{"id":"x","attributes":{"title":"T","type":"code","effective_severity_level":"low","status":"open","ignored":false}}}`)
+	}))
+	defer srv.Close()
+
+	var events []string
+	c := newTestClient(srv)
+	c.Progress = func(event string) { events = append(events, event) }
+	if _, err := c.Get(context.Background(), "o", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %v, want one retry event", events)
+	}
+	if !strings.Contains(events[0], "HTTP 429") || !strings.Contains(events[0], fmt.Sprintf("attempt 1/%d", MaxRetries)) {
+		t.Errorf("event = %q", events[0])
+	}
+}
+
+func TestClientWithoutProgressIsSilent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":[],"links":{}}`)
+	}))
+	defer srv.Close()
+
+	if _, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"})); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGetRetriesOnTransient5xx(t *testing.T) {
 	attempts := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,6 +279,18 @@ func TestBodySnippetTruncates(t *testing.T) {
 	}
 	if got := bodySnippet([]byte("short")); got != "short" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// The 300-byte cut can split a UTF-8 sequence; the snippet must stay valid.
+func TestBodySnippetIsUTF8Safe(t *testing.T) {
+	// 299 ASCII bytes + é (2 bytes): the cut at 300 leaves a dangling byte.
+	got := bodySnippet([]byte(strings.Repeat("x", 299) + "é"))
+	if !utf8.ValidString(got) {
+		t.Fatalf("snippet is not valid UTF-8: %q", got)
+	}
+	if len(got) != 299 {
+		t.Fatalf("len = %d, want 299 (dangling byte dropped)", len(got))
 	}
 }
 

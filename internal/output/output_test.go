@@ -38,6 +38,19 @@ func TestIsTTYPipeIsNotTTY(t *testing.T) {
 	}
 }
 
+// Character devices like /dev/null must not pass as terminals: a redirect
+// to /dev/null would otherwise flip auto mode to the human table.
+func TestIsTTYNullDeviceIsNotTTY(t *testing.T) {
+	f, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		t.Skipf("no null device available: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if IsTTY(f) {
+		t.Error("null device detected as TTY")
+	}
+}
+
 func TestRenderIssuesTable(t *testing.T) {
 	items := []snyk.Issue{
 		{ID: "2", Severity: "low", IssueType: "code", Title: "Insecure hash", ProjectID: "abc12345-def0",
@@ -129,7 +142,7 @@ func TestWriteEnvelopeShape(t *testing.T) {
 	}
 }
 
-func TestTruncate(t *testing.T) {
+func TestTruncateRight(t *testing.T) {
 	cases := []struct {
 		in   string
 		max  int
@@ -141,8 +154,24 @@ func TestTruncate(t *testing.T) {
 		{strings.Repeat("ñ", 80), 60, strings.Repeat("ñ", 59) + "…"},
 	}
 	for _, c := range cases {
-		if got := truncate(c.in, c.max); got != c.want {
-			t.Errorf("truncate(%q chars, %d) wrong: got %d chars", []rune(c.in), c.max, len([]rune(got)))
+		if got := truncateRight(c.in, c.max); got != c.want {
+			t.Errorf("truncateRight(%q chars, %d) wrong: got %d chars", []rune(c.in), c.max, len([]rune(got)))
+		}
+	}
+}
+
+func TestTruncateLeftKeepsTheTail(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"short.js", 28, "short.js"},
+		{"src/a/very/deeply/nested/path/to/module/gateway.js:99", 28, "…ath/to/module/gateway.js:99"},
+	}
+	for _, c := range cases {
+		if got := truncateLeft(c.in, c.width); got != c.want {
+			t.Errorf("truncateLeft(%q, %d) = %q, want %q", c.in, c.width, got, c.want)
 		}
 	}
 }

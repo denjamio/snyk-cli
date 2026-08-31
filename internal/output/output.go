@@ -38,12 +38,12 @@ func ResolveMode(jsonFlag, quietFlag bool) Mode {
 	}
 }
 
+// IsTTY reports whether f is attached to a terminal. The probe is
+// platform-implemented (isatty_*.go): a real terminal query — not just a
+// ModeCharDevice check — so character devices like /dev/null are not
+// mistaken for terminals in auto output mode.
 func IsTTY(f *os.File) bool {
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return isTerminal(f)
 }
 
 func WriteJSON(w io.Writer, v any) error {
@@ -64,7 +64,7 @@ func RenderIssuesTable(w io.Writer, items []snyk.Issue, summary string) {
 	fmt.Fprintln(tw, "SEVERITY\tTYPE\tTITLE\tWHERE\tPROJECT")
 	for _, it := range items {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			strings.ToUpper(it.Severity), it.IssueType, truncate(it.Title, 40),
+			strings.ToUpper(it.Severity), it.IssueType, truncateRight(it.Title, 40),
 			where(it), shortID(it.ProjectID))
 	}
 	_ = tw.Flush()
@@ -95,22 +95,26 @@ func severityLabel(severity string) string {
 
 func where(it snyk.Issue) string {
 	if it.Location != nil && it.Location.File != "" {
-		return whereTrunc(fmt.Sprintf("%s:%d", it.Location.File, it.Location.StartLine))
+		return truncateLeft(fmt.Sprintf("%s:%d", it.Location.File, it.Location.StartLine), whereWidth)
 	}
 	return "-"
 }
 
 const whereWidth = 28
 
-func whereTrunc(s string) string {
+// truncateLeft keeps the tail of s (the last width runes, including an
+// ellipsis), so long paths still show the file name next to the line.
+func truncateLeft(s string, width int) string {
 	r := []rune(s)
-	if len(r) <= whereWidth {
+	if len(r) <= width {
 		return s
 	}
-	return "…" + string(r[len(r)-whereWidth+1:])
+	return "…" + string(r[len(r)-width+1:])
 }
 
-func truncate(s string, max int) string {
+// truncateRight keeps the head of s (the first max runes, ending in an
+// ellipsis).
+func truncateRight(s string, max int) string {
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s

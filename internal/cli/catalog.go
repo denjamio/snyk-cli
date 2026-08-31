@@ -169,6 +169,7 @@ Environment:
   SNYK_ORG_ID          Default for --org on issues list and issues get (flag wins)
   SNYK_PROJECT_ID      Default for --project on issues list (flag wins)
   SNYK_API_URL         Optional API base URL (default https://api.eu.snyk.io)
+  SNYK_HTTP_TIMEOUT    Optional per-request timeout, Go duration (default 60s)
 
 Exit codes: 0 success · 1 runtime error · 2 usage error
 `)

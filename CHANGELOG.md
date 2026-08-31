@@ -8,6 +8,14 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Changed
 
+- Usage errors (exit 2) also emit a structured `{"ok":false}` envelope on
+  stdout when piped or when `--json`/`--quiet` was requested — the same
+  contract as runtime errors — so agents and scripts parse every failure
+  uniformly; the plain message and usage text remain on stderr.
+- `help` is part of the machine-readable catalog, so `help --json` is
+  self-describing; the human usage text and `help --json` are both
+  generated from one declarative command spec, together with the flag
+  bindings.
 - Cancellation: `SIGINT`/`SIGTERM` cancel in-flight API calls; retry waits
   abort immediately instead of sleeping through them.
 - API responses larger than 10 MB are rejected with a clear error instead
@@ -22,10 +30,22 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- Progress reporting for humans: fetched pages and retry waits are logged
+  to stderr — only when it is a terminal. Piped and `--json` runs (agents,
+  scripts) stay silent, keeping their stdout payload the whole story.
+- `SNYK_HTTP_TIMEOUT` env var: optional per-request HTTP timeout as a Go
+  duration (e.g. `90s`, default `60s`), so pipelines can bound the worst
+  case; invalid values are usage errors (exit 2) before any call is made.
 - Fuzz tests for the flag pre-parser and the group slug generator.
 
 ### Fixed
 
+- API error snippets never end in a malformed UTF-8 sequence after the
+  300-byte cut.
+- TTY detection probes the terminal (ioctl/console query) instead of the
+  `ModeCharDevice` heuristic, so character devices like `/dev/null` are no
+  longer mistaken for a terminal — `snyk issues list > /dev/null` stays on
+  the structured path.
 - `snyk skill install` writes `SKILL.md` atomically (temp file + rename);
   an interrupted install can no longer leave a truncated file behind.
 

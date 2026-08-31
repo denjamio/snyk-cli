@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,34 @@ import (
 func newStreams() (Streams, *bytes.Buffer, *bytes.Buffer) {
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	return Streams{Out: out, Err: errOut, OutIsTTY: false}, out, errOut
+}
+
+var updateGolden = flag.Bool("update", false, "rewrite the golden files")
+
+// TestListEnvelopeGolden pins the JSON envelope contract byte for byte:
+// the sorted, closed payload that pipelines and agents rely on. Intentional
+// contract changes are applied with `go test ./internal/cli -update` and
+// land in review as the diff they are.
+func TestListEnvelopeGolden(t *testing.T) {
+	startMockSnyk(t)
+	s, out, _ := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	golden := filepath.Join("testdata", "issues_list_envelope.json")
+	if *updateGolden {
+		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("golden file missing; run with -update: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Errorf("envelope drifted from the golden contract\n--- golden ---\n%s\n--- got ---\n%s", want, out.Bytes())
+	}
 }
 
 func decodeEnvelope(t *testing.T, data []byte) output.Envelope {
@@ -113,6 +142,59 @@ func TestUnknownCommandExit2(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "unknown command") {
 		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// Usage errors must reach non-human consumers as structured envelopes too,
+// mirroring runtime errors: piped always, or on a TTY when --json/--quiet
+// was explicitly requested.
+func TestUsageErrorEnvelopeWhenPiped(t *testing.T) {
+	s, out, errOut := newStreams()
+	if rc := Run(context.Background(), []string{"bogus"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if env.OK || env.Command != "bogus" || !strings.Contains(env.Error, "unknown command") {
+		t.Fatalf("envelope = %+v", env)
+	}
+	if !strings.Contains(errOut.String(), "unknown command") {
+		t.Errorf("stderr = %q, want the plain message as well", errOut.String())
+	}
+}
+
+func TestUsageErrorEnvelopeWithJSONOnTTY(t *testing.T) {
+	clearScopeEnv(t)
+	s, out, _ := newStreams()
+	s.OutIsTTY = true
+	if rc := Run(context.Background(), []string{"issues", "list", "--json"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if env.OK || env.Command != "issues list" || !strings.Contains(env.Error, "--org is required") {
+		t.Fatalf("envelope = %+v", env)
+	}
+}
+
+func TestUsageErrorEnvelopeWithQuietWhenPiped(t *testing.T) {
+	clearScopeEnv(t)
+	s, out, _ := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "get", "--quiet"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if env.OK || env.Command != "issues get" || !strings.Contains(env.Error, "ISSUE_ID") {
+		t.Fatalf("envelope = %+v", env)
+	}
+}
+
+func TestUsageErrorPlainOnTTYWithoutJSON(t *testing.T) {
+	s, out, _ := newStreams()
+	s.OutIsTTY = true
+	if rc := Run(context.Background(), []string{"bogus"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout should stay clean for humans, got %q", out.String())
 	}
 }
 
@@ -728,6 +810,88 @@ func TestEnvVarsProvideOrgAndProject(t *testing.T) {
 	}
 	if lastPath != "/rest/orgs/flagorg/issues/c" {
 		t.Errorf("get did not honor explicit org, path = %q", lastPath)
+	}
+}
+
+// SNYK_HTTP_TIMEOUT tunes the per-request timeout; valid values are
+// accepted (the request goes through), anything that is not a positive
+// duration is a usage error before any call is made.
+func TestSnykHTTPTimeout(t *testing.T) {
+	startMockSnyk(t)
+
+	s, _, _ := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--quiet", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d without SNYK_HTTP_TIMEOUT", rc)
+	}
+
+	s, _, errOut := newStreams()
+	t.Setenv("SNYK_HTTP_TIMEOUT", "-1s")
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 2 {
+		t.Fatalf("rc = %d for negative SNYK_HTTP_TIMEOUT, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "invalid SNYK_HTTP_TIMEOUT") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+
+	s, _, errOut = newStreams()
+	t.Setenv("SNYK_HTTP_TIMEOUT", "not-a-duration")
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1"}, s); rc != 2 {
+		t.Fatalf("rc = %d for invalid SNYK_HTTP_TIMEOUT, want 2", rc)
+	}
+	if !strings.Contains(errOut.String(), "invalid SNYK_HTTP_TIMEOUT") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+
+	s, _, _ = newStreams()
+	t.Setenv("SNYK_HTTP_TIMEOUT", "90s")
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--quiet"}, s); rc != 0 {
+		t.Fatalf("rc = %d with valid SNYK_HTTP_TIMEOUT", rc)
+	}
+}
+
+// Progress events reach stderr only on interactive terminals; piped
+// consumers — scripts, agents — get a silent run and a clean stream.
+func TestProgressOnTTYOnly(t *testing.T) {
+	startMock429Once := func(t *testing.T) {
+		t.Helper()
+		attempts := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts++
+			w.Header().Set("Retry-After", "0")
+			if attempts == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("Content-Type", "application/vnd.api+json")
+			fmt.Fprint(w, `{"data":[],"links":{}}`)
+		}))
+		t.Cleanup(srv.Close)
+		clearScopeEnv(t)
+		t.Setenv("SNYK_TOKEN", "t")
+		t.Setenv("SNYK_API_URL", srv.URL)
+	}
+
+	startMock429Once(t)
+	sTTY, _, errTTY := newStreams()
+	sTTY.ErrIsTTY = true
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1"}, sTTY); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if !strings.Contains(errTTY.String(), "snyk: HTTP 429, retrying") {
+		t.Errorf("stderr on TTY = %q, want retry progress", errTTY.String())
+	}
+
+	startMock429Once(t)
+	sPipe, outPipe, errPipe := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1"}, sPipe); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if errPipe.Len() != 0 {
+		t.Errorf("piped stderr = %q, want silence", errPipe.String())
+	}
+	env := decodeEnvelope(t, outPipe.Bytes())
+	if !env.OK {
+		t.Fatalf("envelope = %+v", env)
 	}
 }
 

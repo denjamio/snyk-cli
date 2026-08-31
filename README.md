@@ -25,7 +25,9 @@ have — that is the gap this fills:
   final tie-break — a total order. Diff two runs, schedule an export, store
   once — no noise to filter.
 - **Hands-off reliability**: pagination and transient-failure retries are
-  handled inside the binary, not in your script.
+  handled inside the binary, not in your script. Progress (pages fetched,
+  retry waits) is reported on stderr only when it is a terminal — piped
+  and `--json` runs stay silent, so their output is the whole story.
 - **No baggage**: a single static Go binary, standard library only,
   checksummed installers for linux/darwin/windows.
 
@@ -117,8 +119,10 @@ the allowed set.
 Output modes: auto (TTY → table · piped → envelope), `--json` (envelope
 always), `--quiet` (bare array for `issues list`, single object for
 `issues get`). Errors
-are structured too: piped/JSON → `{"ok":false,"error":...}` on stdout;
-TTY → plain message on stderr. Exit codes: `0` success · `1` runtime/API
+are structured too: piped/JSON → `{"ok":false,"command":...,"error":...}`
+on stdout — for runtime errors and usage errors alike (usage errors also
+print the usage text on stderr); TTY → plain message on stderr. Exit
+codes: `0` success · `1` runtime/API
 error · `2` usage error.
 
 ## Output contract
@@ -224,6 +228,7 @@ Guarantees:
 | `SNYK_ORG_ID` | Default for `--org` on `issues list` and `issues get` (flag wins) |
 | `SNYK_PROJECT_ID` | Default for `--project` on `issues list` (flag wins) |
 | `SNYK_API_URL` | Optional base URL (default `https://api.eu.snyk.io`) |
+| `SNYK_HTTP_TIMEOUT` | Optional per-request HTTP timeout, Go duration like `90s` (default `60s`) |
 
 Precedence is flag > env var: an explicit `--org`/`--project` overrides the
 matching env var; an env var set to the empty string counts as unset.

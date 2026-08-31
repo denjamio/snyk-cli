@@ -29,10 +29,16 @@ type Streams struct {
 	Out      io.Writer
 	Err      io.Writer
 	OutIsTTY bool
+	ErrIsTTY bool
 }
 
 func NewOSStreams() Streams {
-	return Streams{Out: os.Stdout, Err: os.Stderr, OutIsTTY: output.IsTTY(os.Stdout)}
+	return Streams{
+		Out:      os.Stdout,
+		Err:      os.Stderr,
+		OutIsTTY: output.IsTTY(os.Stdout),
+		ErrIsTTY: output.IsTTY(os.Stderr),
+	}
 }
 
 func flagsFirst(args []string) ([]string, []string) {
@@ -103,7 +109,7 @@ func (b *boundFlags) boolean(name string) bool {
 
 func Run(ctx context.Context, args []string, s Streams) int {
 	if len(args) == 0 {
-		return usageError(s, "missing command")
+		return usageError(s, "", "missing command", args)
 	}
 	switch args[0] {
 	case "issues":
@@ -116,7 +122,7 @@ func Run(ctx context.Context, args []string, s Streams) int {
 		fmt.Fprintln(s.Out, "snyk "+Version)
 		return 0
 	default:
-		return usageError(s, "unknown command: "+args[0])
+		return usageError(s, args[0], "unknown command: "+args[0], args)
 	}
 }
 
@@ -124,7 +130,7 @@ func Run(ctx context.Context, args []string, s Streams) int {
 // dependencies, ...) plug in as sibling resource dispatchers in Run.
 func runIssues(ctx context.Context, args []string, s Streams) int {
 	if len(args) == 0 {
-		return usageError(s, "missing issues command (available: list, get)")
+		return usageError(s, "issues", "missing issues command (available: list, get)", args)
 	}
 	switch args[0] {
 	case "list":
@@ -132,7 +138,7 @@ func runIssues(ctx context.Context, args []string, s Streams) int {
 	case "get":
 		return runGet(ctx, args[1:], s)
 	default:
-		return usageError(s, "unknown issues command: "+args[0])
+		return usageError(s, "issues "+args[0], "unknown issues command: "+args[0], args)
 	}
 }
 
@@ -144,7 +150,7 @@ func runHelp(args []string, s Streams) int {
 		return code
 	}
 	if len(positional) > 0 {
-		return usageError(s, fmt.Sprintf("unexpected argument %q; help takes no positional arguments", positional[0]))
+		return usageError(s, helpSpec.Name, fmt.Sprintf("unexpected argument %q; help takes no positional arguments", positional[0]), args)
 	}
 	if !f.boolean("json") {
 		printUsage(s.Out)
@@ -170,6 +176,41 @@ func resolveSetting(flagValue, envKey string) string {
 	return os.Getenv(envKey)
 }
 
+// snykClient builds the API client from the environment — the one place
+// where token and tuning env vars are resolved. SNYK_TOKEN is required
+// (runtime error); SNYK_HTTP_TIMEOUT optionally bounds each HTTP request
+// and must be a positive Go duration (invalid values are usage errors).
+// When ok is false the second result is the exit code to return.
+func snykClient(s Streams, command string) (*snyk.Client, int, bool) {
+	token := os.Getenv("SNYK_TOKEN")
+	if token == "" {
+		return nil, runtimeError(s, command, "SNYK_TOKEN not set"), false
+	}
+	client := snyk.NewClient(token, os.Getenv("SNYK_API_URL"))
+	client.Progress = progressLogger(s)
+	if v := os.Getenv("SNYK_HTTP_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, usageError(s, command, "invalid SNYK_HTTP_TIMEOUT: must be a positive duration like 90s or 2m", nil), false
+		}
+		client.HTTP.Timeout = d
+	}
+	return client, 0, true
+}
+
+// progressLogger renders client operational events (pagination, retries)
+// on stderr, and only when stderr is a terminal: humans see progress,
+// while piped consumers — scripts and agents — get nothing extra, so
+// their stdout payload stays the whole story.
+func progressLogger(s Streams) func(string) {
+	if !s.ErrIsTTY {
+		return nil
+	}
+	return func(event string) {
+		fmt.Fprintln(s.Err, "snyk:", event)
+	}
+}
+
 func runList(ctx context.Context, args []string, s Streams) int {
 	fs := newFlagSet(issuesListSpec.Name)
 	f := bind(fs, issuesListSpec.Flags)
@@ -178,37 +219,35 @@ func runList(ctx context.Context, args []string, s Streams) int {
 		return code
 	}
 	if len(positional) > 0 {
-		return usageError(s, fmt.Sprintf("unexpected argument %q; issues list takes no positional arguments", positional[0]))
+		return usageError(s, issuesListSpec.Name, fmt.Sprintf("unexpected argument %q; issues list takes no positional arguments", positional[0]), args)
 	}
 	org := resolveSetting(f.str("org"), "SNYK_ORG_ID")
 	if org == "" {
-		return usageError(s, "--org is required (or set SNYK_ORG_ID)")
+		return usageError(s, issuesListSpec.Name, "--org is required (or set SNYK_ORG_ID)", args)
 	}
 	project := resolveSetting(f.str("project"), "SNYK_PROJECT_ID")
 	if project == "" {
-		return usageError(s, "--project is required (or set SNYK_PROJECT_ID)")
+		return usageError(s, issuesListSpec.Name, "--project is required (or set SNYK_PROJECT_ID)", args)
 	}
 	createdAfter := f.str("created-after")
 	if createdAfter != "" {
 		if _, err := time.Parse(time.RFC3339, createdAfter); err != nil {
-			return usageError(s, "invalid --created-after: must be an RFC3339 date-time like 2026-08-01T00:00:00Z")
+			return usageError(s, issuesListSpec.Name, "invalid --created-after: must be an RFC3339 date-time like 2026-08-01T00:00:00Z", args)
 		}
 	}
 	sevToks, err := normalizeList(f.str("severity"), severities, "severity")
 	if err != nil {
-		return usageError(s, err.Error())
+		return usageError(s, issuesListSpec.Name, err.Error(), args)
 	}
 	statusToks, err := normalizeList(f.str("status"), statuses, "status")
 	if err != nil {
-		return usageError(s, err.Error())
+		return usageError(s, issuesListSpec.Name, err.Error(), args)
 	}
-	token := os.Getenv("SNYK_TOKEN")
-	if token == "" {
-		return runtimeError(s, "issues list", "SNYK_TOKEN not set")
+	client, code, ok := snykClient(s, issuesListSpec.Name)
+	if !ok {
+		return code
 	}
-	client := snyk.NewClient(token, os.Getenv("SNYK_API_URL"))
-	query, err := snyk.BuildListQuery(snyk.ListOptions{
-		Severity:         strings.Join(sevToks, ","),
+	query, err := snyk.BuildListQuery(snyk.ListOptions{Severity: strings.Join(sevToks, ","),
 		Status:           strings.Join(statusToks, ","),
 		IncludeIgnored:   f.boolean("include-ignored"),
 		ProjectID:        project,
@@ -269,17 +308,16 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 		return code
 	}
 	if len(positional) != 1 {
-		return usageError(s, "exactly one ISSUE_ID argument is required")
+		return usageError(s, issuesGetSpec.Name, "exactly one ISSUE_ID argument is required", args)
 	}
 	org := resolveSetting(f.str("org"), "SNYK_ORG_ID")
 	if org == "" {
-		return usageError(s, "--org is required (or set SNYK_ORG_ID)")
+		return usageError(s, issuesGetSpec.Name, "--org is required (or set SNYK_ORG_ID)", args)
 	}
-	token := os.Getenv("SNYK_TOKEN")
-	if token == "" {
-		return runtimeError(s, "issues get", "SNYK_TOKEN not set")
+	client, code, ok := snykClient(s, issuesGetSpec.Name)
+	if !ok {
+		return code
 	}
-	client := snyk.NewClient(token, os.Getenv("SNYK_API_URL"))
 	raw, err := client.Get(ctx, org, positional[0])
 	if err != nil {
 		return runtimeError(s, "issues get", err.Error())
@@ -304,23 +342,22 @@ func runSkill(args []string, s Streams) int {
 	}
 	for _, p := range positional {
 		if p != "install" {
-			return usageError(s, fmt.Sprintf("unexpected argument %q; only the optional action install is accepted", p))
+			return usageError(s, skillSpec.Name, fmt.Sprintf("unexpected argument %q; only the optional action install is accepted", p), args)
 		}
 	}
-	dir := f.str("dir")
-	global := f.boolean("global")
 	if f.boolean("print") {
-		if global || dir != "" {
-			return usageError(s, "--print cannot be combined with a destination")
+		if f.boolean("global") || f.str("dir") != "" {
+			return usageError(s, skillSpec.Name, "--print cannot be combined with a destination", args)
 		}
 		fmt.Fprint(s.Out, embedded.SkillMD)
 		return 0
 	}
+	dir := f.str("dir")
 	base := ""
 	switch {
 	case dir != "":
 		base = dir
-	case global:
+	case f.boolean("global"):
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return runtimeError(s, "skill", err.Error())
@@ -359,9 +396,9 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -380,7 +417,7 @@ func parseFS(fs *flag.FlagSet, args []string, s Streams) (code int, ok bool) {
 		if err == flag.ErrHelp {
 			return 0, false
 		}
-		return usageError(s, err.Error()), false
+		return usageError(s, fs.Name(), err.Error(), args), false
 	}
 	return 0, true
 }
@@ -440,10 +477,35 @@ func runtimeError(s Streams, command, msg string) int {
 	return 1
 }
 
-func usageError(s Streams, msg string) int {
+// usageError reports an invalid invocation (exit 2). Like runtime errors,
+// the failure is also emitted as a structured envelope when the consumer is
+// not a TTY or explicitly asked for machine output, so agents and scripts
+// can parse any failure uniformly; the plain message and the usage text
+// always go to stderr.
+func usageError(s Streams, command, msg string, args []string) int {
+	if !s.OutIsTTY || jsonRequested(args) {
+		if err := output.WriteJSON(s.Out, output.Envelope{OK: false, Command: command, Error: msg}); err != nil {
+			fmt.Fprintln(s.Err, "error:", err)
+		}
+	}
 	fmt.Fprintln(s.Err, "error:", msg)
 	printUsage(s.Err)
 	return 2
+}
+
+// jsonRequested reports whether the raw args explicitly ask for
+// machine-readable output (--json/--quiet), even when flag parsing never
+// got that far — usage errors then reach agents as structured envelopes too.
+func jsonRequested(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "--":
+			return false
+		case "--json", "--json=true", "--quiet", "--quiet=true":
+			return true
+		}
+	}
+	return false
 }
 
 func newFlagSet(name string) *flag.FlagSet {

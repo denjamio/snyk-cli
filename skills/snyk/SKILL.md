@@ -58,6 +58,9 @@ fetch binaries yourself.
 - Pagination, retries (429/5xx) and API-version pinning are handled inside
   the binary. Do not paginate manually or re-run in a retry loop; an
   exit 1 means retries were exhausted or the request was invalid.
+- Progress lines (pages fetched, retries) may appear on stderr in
+  interactive terminals; piped `--json` runs are silent. Parse stdout
+  only.
 - Use `--quiet` only when the bare groups array is needed for scripting.
 
 ## Output envelope
@@ -112,7 +115,8 @@ Exit codes decide the next action:
 - `1` → runtime/API error: read the envelope `error` (or stderr) and
   surface it to the user. Transient HTTP 429/5xx were already retried
   internally; do not retry blindly.
-- `2` → usage error: fix the invocation (unknown flag value, missing
+- `2` → usage error: read the envelope `error` on stdout (the usage text
+  goes to stderr), fix the invocation (unknown flag value, missing
   org/project) and retry.
 
 Common issues:

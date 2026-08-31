@@ -24,10 +24,12 @@ have — that is the gap this fills:
   group by severity, then most recent `created_at`, with the stable `id` as
   final tie-break — a total order. Diff two runs, schedule an export, store
   once — no noise to filter.
-- **Hands-off reliability**: pagination and transient-failure retries are
-  handled inside the binary, not in your script. Progress (pages fetched,
-  retry waits) is reported on stderr only when it is a terminal — piped
-  and `--json` runs stay silent, so their output is the whole story.
+- **Hands-off reliability**: pagination, transient-failure retries (HTTP
+  429/5xx and network-level errors) and rate-limit waits are handled
+  inside the binary, not in your script. Progress (pages fetched, retry
+  waits) is reported on stderr only when it is a terminal — piped
+  and `--json` runs stay silent, so their output is the whole story
+  (the one exception: the truncation warning, below).
 - **No baggage**: a single static Go binary, standard library only,
   checksummed installers for linux/darwin/windows.
 
@@ -118,12 +120,29 @@ the allowed set.
 
 Output modes: auto (TTY → table · piped → envelope), `--json` (envelope
 always), `--quiet` (bare array for `issues list`, single object for
-`issues get`). Errors
-are structured too: piped/JSON → `{"ok":false,"command":...,"error":...}`
-on stdout — for runtime errors and usage errors alike (usage errors also
+`issues get`). Errors are structured too: piped/JSON →
+`{"ok":false,"command":...,"error":{"kind":...,"message":...}}` on
+stdout — for runtime errors and usage errors alike (usage errors also
 print the usage text on stderr); TTY → plain message on stderr. Exit
 codes: `0` success · `1` runtime/API
 error · `2` usage error.
+
+`error.kind` classifies every failure, so scripts and agents branch on
+it instead of matching message strings:
+
+| Kind | Meaning |
+|---|---|
+| `usage` | invalid invocation (exit 2): unknown flag or value, missing org/project |
+| `config` | environment misconfiguration (e.g. `SNYK_TOKEN` not set) |
+| `auth` | HTTP 401/403 — token revoked or unauthorized |
+| `not_found` | HTTP 404 — unknown org, project or issue id |
+| `rate_limit` | HTTP 429 past the internal retry budget |
+| `transient` | HTTP 502/503/504 past the internal retry budget |
+| `network` | transport failure past the retries (refused/reset connection, timeout) |
+| `canceled` | the run was interrupted (SIGINT/SIGTERM) or its deadline passed |
+| `api` | any other non-200 HTTP status |
+| `decode` | a 200 response whose body is not the expected JSON |
+| `internal` | unexpected local failure |
 
 ## Output contract
 
@@ -137,6 +156,7 @@ error · `2` usage error.
     "groups": [
       {
         "id": "sql-injection",
+        "title": "SQL Injection",
         "severity": "high",
         "issues": [
           {
@@ -178,10 +198,12 @@ error · `2` usage error.
       },
       {
         "id": "hoek-prototype-pollution",
+        "title": "Hoek - Prototype Pollution",
         "severity": "medium",
         "issues": ["..."]
       }
-    ]
+    ],
+    "truncated": false
   }
 }
 ```
@@ -201,7 +223,9 @@ Guarantees:
   output, safe for diffing.
 - Each group's `id` is a deterministic slug of its type name (lowercase,
   non-alphanumerics collapsed to dashes) — the natural key for matching
-  tickets or state per group; the display name is each issue's `title`.
+  tickets or state per group; the group also carries its `title` (the
+  rule name shared by every issue in it), so `--quiet` consumers need not
+  recover the display name from the issues.
 - Issue payload mirrors the Snyk API: every issue field is derived from the
   real payload; triage signals include `cwes` (from `classes`),
   `introduced_at` (last introduction), `last_resolved_at` /
@@ -212,10 +236,18 @@ Guarantees:
   `code_flows_omitted`
   flags truncated flows).
 - The issue structure is closed: every issue carries the same set of keys,
-  with `""`/`[]` or `null` values when the API does not return them; the
-  singular `location` mirrors the first entry of `locations`. Use
+  with `""`/`[]` or `null` values when the API does not return them
+  (nested `location` entries and the group payload are closed the same
+  way); the singular `location` mirrors the first entry of `locations`.
+  Use
   `issues get` when
   full detail is required.
+- Listings are capped at 100 pages (10,000 issues at the default page
+  size). When the cap trips with more pages available the run still
+  succeeds: the payload carries `"truncated": true`, the summary line
+  appends `truncated=true`, and a warning is printed to stderr — even on
+  piped runs, the only stderr output they ever get. Narrow with
+  `--severity`/`--created-after` to fetch the rest.
 - `--quiet` prints the bare `groups` array; `issues get` prints the single
   issue
   object.

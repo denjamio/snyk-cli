@@ -19,12 +19,20 @@ const (
 	ModeQuiet
 )
 
+// ErrorPayload is the structured failure inside the envelope: kind lets
+// machine consumers branch (auth, not_found, rate_limit, ...) without
+// matching message strings, message is the human-readable detail.
+type ErrorPayload struct {
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+}
+
 type Envelope struct {
-	OK      bool   `json:"ok"`
-	Command string `json:"command"`
-	Summary string `json:"summary,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Data    any    `json:"data,omitempty"`
+	OK      bool          `json:"ok"`
+	Command string        `json:"command"`
+	Summary string        `json:"summary,omitempty"`
+	Error   *ErrorPayload `json:"error,omitempty"`
+	Data    any           `json:"data,omitempty"`
 }
 
 func ResolveMode(jsonFlag, quietFlag bool) Mode {
@@ -74,7 +82,7 @@ func RenderGroupsTable(w io.Writer, groups []snyk.IssueGroup, summary string) {
 	fmt.Fprintln(w, summary)
 	fmt.Fprintln(w)
 	for _, g := range groups {
-		fmt.Fprintf(w, "== %s · %d issues · %s\n", g.Type, len(g.Issues), severityLabel(g.Severity))
+		fmt.Fprintf(w, "== %s · %d issues · %s\n", g.Title, len(g.Issues), severityLabel(g.Severity))
 		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "  SEVERITY\tWHERE\tPROJECT\tID")
 		for _, it := range g.Issues {

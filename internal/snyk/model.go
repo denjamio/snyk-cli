@@ -149,29 +149,34 @@ type Issue struct {
 }
 
 type Remediation struct {
-	ManualSteps string `json:"manual_steps,omitempty"`
+	ManualSteps string `json:"manual_steps"`
 }
 
+// Location mirrors one source location. Like Issue, the structure is
+// closed: empty values stay in the payload as "", 0, "".
 type Location struct {
-	File      string `json:"file,omitempty"`
-	StartLine int    `json:"start_line,omitempty"`
-	CommitID  string `json:"commit_id,omitempty"`
+	File      string `json:"file"`
+	StartLine int    `json:"start_line"`
+	CommitID  string `json:"commit_id"`
 }
 
 type IssueGroup struct {
 	ID string `json:"id"`
-	// Type is the display name (the rule title); the payload carries only
-	// the normalized id derived from it.
-	Type     string  `json:"-"`
-	Severity string  `json:"severity,omitempty"`
+	// Title is the display name (the rule title) shared by every issue in
+	// the group; ID is its deterministic slug.
+	Title    string  `json:"title"`
+	Severity string  `json:"severity"`
 	Issues   []Issue `json:"issues"`
 }
 
 // ListData is the `issues list` payload: the flat issue count plus the
-// grouped, ordered view.
+// grouped, ordered view. Truncated is true when the listing hit the
+// MaxPages cap with more pages available — the run still succeeds; narrow
+// with filters to see the rest.
 type ListData struct {
 	TotalIssues int          `json:"total_issues"`
 	Groups      []IssueGroup `json:"groups"`
+	Truncated   bool         `json:"truncated"`
 }
 
 // GroupByType clusters issues by their vulnerability type (the rule title,
@@ -197,16 +202,16 @@ func GroupByType(items []Issue) []IssueGroup {
 		}
 		index[name] = len(groups)
 		groups = append(groups, IssueGroup{
-			Type:     name,
+			Title:    name,
 			Severity: it.Severity,
 			Issues:   []Issue{it},
 		})
 	}
-	slices.SortFunc(groups, func(a, b IssueGroup) int { return strings.Compare(a.Type, b.Type) })
+	slices.SortFunc(groups, func(a, b IssueGroup) int { return strings.Compare(a.Title, b.Title) })
 	for i := range groups {
 		g := &groups[i]
 		slices.SortFunc(g.Issues, issueCompare)
-		g.ID = groupSlug(g.Type)
+		g.ID = groupSlug(g.Title)
 	}
 	taken := map[string]bool{}
 	for i := range groups {

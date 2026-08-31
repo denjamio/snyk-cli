@@ -102,7 +102,7 @@ var (
 	}
 	versionSpec = commandSpec{
 		Name:     "version",
-		Summary:  "Print version",
+		Summary:  "Print version (aliases: -v, --version)",
 		Examples: []string{"snyk version"},
 	}
 )
@@ -118,7 +118,7 @@ func catalog() []commandSpec {
 // -h/--help accepted on every command — so pre-parsing cannot drift from
 // the real flag definitions.
 var booleanFlags = func() map[string]bool {
-	m := map[string]bool{"help": true}
+	m := map[string]bool{"help": true, "h": true}
 	for _, c := range catalog() {
 		for _, f := range c.Flags {
 			if f.Bool {
@@ -172,6 +172,9 @@ Environment:
   SNYK_HTTP_TIMEOUT    Optional per-request timeout, Go duration (default 60s)
 
 Exit codes: 0 success · 1 runtime error · 2 usage error
+Piped failures carry {"ok":false,...,"error":{"kind":...,"message":...}}
+with kind one of: usage, config, auth, not_found, rate_limit, transient,
+network, canceled, api, decode, internal.
 `)
 	fmt.Fprint(w, sb.String())
 }

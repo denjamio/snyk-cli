@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,16 @@ import (
 var (
 	severities = []string{"info", "low", "medium", "high", "critical"}
 	statuses   = []string{"open", "resolved"}
+)
+
+// Failure kinds the CLI layer adds on top of the client's own (auth,
+// not_found, rate_limit, transient, network, api, decode): together they
+// form the closed set the envelope's error.kind may carry.
+const (
+	kindUsage    = "usage"    // invalid invocation (exit 2)
+	kindConfig   = "config"   // environment misconfiguration (e.g. SNYK_TOKEN missing)
+	kindCanceled = "canceled" // caller canceled: SIGINT/SIGTERM or deadline
+	kindInternal = "internal" // unexpected failures: guards, local I/O
 )
 
 // Version is injected at build time via -ldflags "-X ...cli.Version=vX.Y.Z".
@@ -176,6 +187,20 @@ func resolveSetting(flagValue, envKey string) string {
 	return os.Getenv(envKey)
 }
 
+// errorKind classifies any error surfaced through the envelope, so machine
+// consumers branch on error.kind instead of matching message strings.
+func errorKind(err error) string {
+	var apiErr *snyk.Error
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return kindCanceled
+	case errors.As(err, &apiErr):
+		return string(apiErr.Kind)
+	default:
+		return kindInternal
+	}
+}
+
 // snykClient builds the API client from the environment — the one place
 // where token and tuning env vars are resolved. SNYK_TOKEN is required
 // (runtime error); SNYK_HTTP_TIMEOUT optionally bounds each HTTP request
@@ -184,9 +209,10 @@ func resolveSetting(flagValue, envKey string) string {
 func snykClient(s Streams, command string) (*snyk.Client, int, bool) {
 	token := os.Getenv("SNYK_TOKEN")
 	if token == "" {
-		return nil, runtimeError(s, command, "SNYK_TOKEN not set"), false
+		return nil, runtimeError(s, command, kindConfig, "SNYK_TOKEN not set"), false
 	}
 	client := snyk.NewClient(token, os.Getenv("SNYK_API_URL"))
+	client.UserAgent = "snyk-cli/" + Version
 	client.Progress = progressLogger(s)
 	if v := os.Getenv("SNYK_HTTP_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -255,20 +281,27 @@ func runList(ctx context.Context, args []string, s Streams) int {
 		IncludeCodeFlows: f.boolean("include-code-flows"),
 	})
 	if err != nil {
-		return runtimeError(s, "issues list", err.Error())
+		return runtimeError(s, "issues list", errorKind(err), err.Error())
 	}
-	raw, err := client.List(ctx, org, query)
+	raw, truncated, err := client.List(ctx, org, query)
 	if err != nil {
-		return runtimeError(s, "issues list", err.Error())
+		return runtimeError(s, "issues list", errorKind(err), err.Error())
+	}
+	if truncated {
+		// Truncation is an anomaly, not progress: unlike the progress
+		// events this warning reaches stderr even on piped runs, where
+		// progress stays silent, so no consumer mistakes a capped
+		// listing for the full set.
+		fmt.Fprintf(s.Err, "snyk: listing truncated at the %d-issue page cap; narrow with --severity or --created-after to see the rest\n", snyk.MaxPages*snyk.PageLimit)
 	}
 	items := snyk.NormalizeAll(raw)
 	groups := snyk.GroupByType(items)
 	mode := output.ResolveMode(f.boolean("json"), f.boolean("quiet"))
-	var data any = snyk.ListData{TotalIssues: len(items), Groups: groups}
+	var data any = snyk.ListData{TotalIssues: len(items), Groups: groups, Truncated: truncated}
 	if mode == output.ModeQuiet {
 		data = groups
 	}
-	summary := summarize(len(items), strings.Join(statusToks, ","), f.boolean("include-ignored"), strings.Join(sevToks, ","), createdAfter)
+	summary := summarize(len(items), strings.Join(statusToks, ","), f.boolean("include-ignored"), strings.Join(sevToks, ","), createdAfter, truncated)
 	return emit(s, mode, "issues list", summary, data, func(w io.Writer) {
 		output.RenderGroupsTable(w, groups, summary)
 	})
@@ -320,7 +353,7 @@ func runGet(ctx context.Context, args []string, s Streams) int {
 	}
 	raw, err := client.Get(ctx, org, positional[0])
 	if err != nil {
-		return runtimeError(s, "issues get", err.Error())
+		return runtimeError(s, "issues get", errorKind(err), err.Error())
 	}
 	item := snyk.Normalize(*raw)
 	mode := output.ResolveMode(f.boolean("json"), f.boolean("quiet"))
@@ -340,10 +373,11 @@ func runSkill(args []string, s Streams) int {
 	if code, ok := parseFS(fs, flagArgs, s); !ok {
 		return code
 	}
-	for _, p := range positional {
-		if p != "install" {
-			return usageError(s, skillSpec.Name, fmt.Sprintf("unexpected argument %q; only the optional action install is accepted", p), args)
-		}
+	switch {
+	case len(positional) > 1:
+		return usageError(s, skillSpec.Name, "skill takes at most one positional argument: install", args)
+	case len(positional) == 1 && positional[0] != "install":
+		return usageError(s, skillSpec.Name, fmt.Sprintf("unexpected argument %q; only the optional action install is accepted", positional[0]), args)
 	}
 	if f.boolean("print") {
 		if f.boolean("global") || f.str("dir") != "" {
@@ -360,25 +394,25 @@ func runSkill(args []string, s Streams) int {
 	case f.boolean("global"):
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return runtimeError(s, "skill", err.Error())
+			return runtimeError(s, "skill", kindInternal, err.Error())
 		}
 		base = home
 	default:
 		cwd, err := os.Getwd()
 		if err != nil {
-			return runtimeError(s, "skill", err.Error())
+			return runtimeError(s, "skill", kindInternal, err.Error())
 		}
 		base = cwd
 	}
 	target := filepath.Join(base, ".agents", "skills", "snyk", "SKILL.md")
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return runtimeError(s, "skill", err.Error())
+		return runtimeError(s, "skill", kindInternal, err.Error())
 	}
 	action := "installed"
 	if prev, err := os.ReadFile(target); err == nil && string(prev) == embedded.SkillMD {
 		action = "already up to date"
 	} else if err := writeFileAtomic(target, []byte(embedded.SkillMD), 0o644); err != nil {
-		return runtimeError(s, "skill", err.Error())
+		return runtimeError(s, "skill", kindInternal, err.Error())
 	}
 	summary := fmt.Sprintf("skill %s at %s", action, target)
 	mode := output.ResolveMode(f.boolean("json"), false)
@@ -441,8 +475,9 @@ func emit(s Streams, mode output.Mode, command, summary string, data any, render
 	return 0
 }
 
-// summarize renders the envelope summary line from the effective filters.
-func summarize(n int, statusFlag string, includeIgnored bool, severity, createdAfter string) string {
+// summarize renders the envelope summary line from the effective filters;
+// the truncated hint appears only when the page cap actually tripped.
+func summarize(n int, statusFlag string, includeIgnored bool, severity, createdAfter string, truncated bool) string {
 	status := statusFlag
 	if status == "" {
 		status = "open"
@@ -463,15 +498,22 @@ func summarize(n int, statusFlag string, includeIgnored bool, severity, createdA
 	if createdAfter != "" {
 		parts = append(parts, "created_after="+createdAfter)
 	}
+	if truncated {
+		parts = append(parts, "truncated=true")
+	}
 	return strings.Join(parts, " · ")
 }
 
-func runtimeError(s Streams, command, msg string) int {
+func runtimeError(s Streams, command, kind, msg string) int {
 	if s.OutIsTTY {
 		fmt.Fprintln(s.Err, "error:", msg)
 		return 1
 	}
-	if err := output.WriteJSON(s.Out, output.Envelope{OK: false, Command: command, Error: msg}); err != nil {
+	if err := output.WriteJSON(s.Out, output.Envelope{
+		OK:      false,
+		Command: command,
+		Error:   &output.ErrorPayload{Kind: kind, Message: msg},
+	}); err != nil {
 		fmt.Fprintln(s.Err, "error:", err)
 	}
 	return 1
@@ -484,7 +526,11 @@ func runtimeError(s Streams, command, msg string) int {
 // always go to stderr.
 func usageError(s Streams, command, msg string, args []string) int {
 	if !s.OutIsTTY || jsonRequested(args) {
-		if err := output.WriteJSON(s.Out, output.Envelope{OK: false, Command: command, Error: msg}); err != nil {
+		if err := output.WriteJSON(s.Out, output.Envelope{
+			OK:      false,
+			Command: command,
+			Error:   &output.ErrorPayload{Kind: kindUsage, Message: msg},
+		}); err != nil {
 			fmt.Fprintln(s.Err, "error:", err)
 		}
 	}
@@ -495,15 +541,25 @@ func usageError(s Streams, command, msg string, args []string) int {
 
 // jsonRequested reports whether the raw args explicitly ask for
 // machine-readable output (--json/--quiet), even when flag parsing never
-// got that far — usage errors then reach agents as structured envelopes too.
+// got that far — usage errors then reach agents as structured envelopes
+// too. The flag package accepts single-dash spellings, so those count as
+// well; an explicit =false value opts out.
 func jsonRequested(args []string) bool {
 	for _, a := range args {
-		switch a {
-		case "--":
+		if a == "--" {
 			return false
-		case "--json", "--json=true", "--quiet", "--quiet=true":
-			return true
 		}
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if name != "json" && name != "quiet" {
+			continue
+		}
+		if hasValue && value == "false" {
+			continue
+		}
+		return true
 	}
 	return false
 }

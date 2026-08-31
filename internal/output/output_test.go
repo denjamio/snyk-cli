@@ -88,7 +88,7 @@ func TestRenderIssuesTable(t *testing.T) {
 func TestRenderGroupsTable(t *testing.T) {
 	groups := []snyk.IssueGroup{
 		{
-			ID: "sql-injection", Type: "SQL Injection", Severity: "critical",
+			ID: "sql-injection", Title: "SQL Injection", Severity: "critical",
 			Issues: []snyk.Issue{
 				{ID: "b22", Severity: "critical", ProjectID: "abc12345-def0",
 					Location: &snyk.Location{File: "src/db.js", StartLine: 10}},
@@ -97,7 +97,7 @@ func TestRenderGroupsTable(t *testing.T) {
 			},
 		},
 		{
-			ID: "weak-hash", Type: "Weak Hash", Severity: "medium",
+			ID: "weak-hash", Title: "Weak Hash", Severity: "medium",
 			Issues: []snyk.Issue{
 				{ID: "c33", Severity: "medium", ProjectID: "abc12345-def0",
 					Location: &snyk.Location{File: "src/hash.js", StartLine: 22}},

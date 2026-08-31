@@ -14,20 +14,24 @@ import (
 )
 
 const (
-	DefaultBaseURL = "https://api.eu.snyk.io"
-	APIVersion     = "2026-03-25"
-	PageLimit      = 100
-	MaxPages       = 100
-	MaxRetries     = 5
-	httpTimeout    = 60 * time.Second
-	maxRetryWait   = 120 * time.Second
-	maxBodyBytes   = 10 << 20
+	DefaultBaseURL   = "https://api.eu.snyk.io"
+	APIVersion       = "2026-03-25"
+	PageLimit        = 100
+	MaxPages         = 100
+	MaxRetries       = 5
+	httpTimeout      = 60 * time.Second
+	maxRetryWait     = 120 * time.Second
+	maxBodyBytes     = 10 << 20
+	defaultUserAgent = "snyk-cli"
 )
 
 type Client struct {
 	Token   string
 	BaseURL string
 	HTTP    *http.Client
+	// UserAgent is sent on every request; NewClient sets a default the
+	// CLI overrides with the build version ("snyk-cli/vX.Y.Z").
+	UserAgent string
 	// Progress, when set, receives one-line operational events (pagination
 	// pages, retry waits). It is called synchronously from the request
 	// path; the CLI wires it to stderr on interactive terminals only, so
@@ -42,7 +46,12 @@ func NewClient(token, baseURL string) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
-	return &Client{Token: token, BaseURL: strings.TrimRight(baseURL, "/"), HTTP: &http.Client{Timeout: httpTimeout}}
+	return &Client{
+		Token:     token,
+		BaseURL:   strings.TrimRight(baseURL, "/"),
+		HTTP:      &http.Client{Timeout: httpTimeout},
+		UserAgent: defaultUserAgent,
+	}
 }
 
 // ListOptions describes one issues-list query. Severity/Status are
@@ -99,9 +108,12 @@ type pageResponse struct {
 }
 
 // List retrieves every page of issues for orgID under query, following the
-// cursor links until exhausted (bounded by MaxPages). The query is copied
-// before pagination params are added, so the caller's value is untouched.
-func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]RawIssue, error) {
+// cursor links until exhausted (bounded by MaxPages). When the page cap
+// trips with more pages available the issues fetched so far are returned
+// with truncated=true — never an error; callers narrow with filters to see
+// the rest. The query is copied before pagination params are added, so the
+// caller's value is untouched.
+func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]RawIssue, bool, error) {
 	q := cloneValues(query)
 	q.Set("version", APIVersion)
 	q.Set("limit", strconv.Itoa(PageLimit))
@@ -109,15 +121,15 @@ func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]Ra
 	var out []RawIssue
 	for page := 0; next != ""; page++ {
 		if page >= MaxPages {
-			return nil, fmt.Errorf("pagination exceeded %d pages", MaxPages)
+			return out, true, nil
 		}
 		body, err := c.get(ctx, next)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		var p pageResponse
 		if err := json.Unmarshal(body, &p); err != nil {
-			return nil, fmt.Errorf("decode list response: %w", err)
+			return nil, false, decodeError("decode list response: %w", err)
 		}
 		out = append(out, p.Data...)
 		if c.Progress != nil {
@@ -128,7 +140,7 @@ func (c *Client) List(ctx context.Context, orgID string, query url.Values) ([]Ra
 			next = n
 		}
 	}
-	return out, nil
+	return out, false, nil
 }
 
 // Get retrieves a single issue with code flows always included.
@@ -143,7 +155,7 @@ func (c *Client) Get(ctx context.Context, orgID, issueID string) (*RawIssue, err
 		Data RawIssue `json:"data"`
 	}
 	if err := json.Unmarshal(body, &p); err != nil {
-		return nil, fmt.Errorf("decode issue response: %w", err)
+		return nil, decodeError("decode issue response: %w", err)
 	}
 	return &p.Data, nil
 }
@@ -180,9 +192,29 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 		}
 		req.Header.Set("Authorization", "token "+c.Token)
 		req.Header.Set("Accept", "application/vnd.api+json")
+		if c.UserAgent != "" {
+			req.Header.Set("User-Agent", c.UserAgent)
+		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			return nil, err
+			// GET never mutates server state, so a transport failure
+			// (refused or reset connection, timeout, TLS handshake) is
+			// retried like a transient status — except a caller-canceled
+			// context, which ends the run immediately.
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lastErr = fmt.Errorf("snyk api: %w", err)
+			if attempt < MaxRetries {
+				if c.Progress != nil {
+					c.Progress(networkRetryEvent(err, transientRetryDelay(attempt), attempt))
+				}
+				if err := sleepCtx(ctx, transientRetryDelay(attempt)); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, &Error{Kind: KindNetwork, err: lastErr}
 		}
 		body, err := readBody(resp)
 		_ = resp.Body.Close()
@@ -207,12 +239,12 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 				return nil, err
 			}
 		case resp.StatusCode != http.StatusOK:
-			return nil, fmt.Errorf("snyk api %s: HTTP %d: %s", u, resp.StatusCode, bodySnippet(body))
+			return nil, apiError(resp.StatusCode, "snyk api %s: HTTP %d: %s", u, resp.StatusCode, bodySnippet(body))
 		default:
 			return body, nil
 		}
 	}
-	return nil, lastErr
+	return nil, &Error{Kind: KindNetwork, err: lastErr}
 }
 
 // readBody reads the response body capped at maxBodyBytes. The reader is
@@ -267,6 +299,13 @@ func pageEvent(n, page int) string {
 // failure; attempt is 0-based, reported 1-based out of MaxRetries.
 func retryEvent(status int, wait time.Duration, attempt int) string {
 	return fmt.Sprintf("HTTP %d, retrying in %s (attempt %d/%d)", status, wait, attempt+1, MaxRetries)
+}
+
+// networkRetryEvent renders the retry progress line for a transport-level
+// failure (connection refused or reset, timeout); attempt is 0-based,
+// reported 1-based out of MaxRetries.
+func networkRetryEvent(err error, wait time.Duration, attempt int) string {
+	return fmt.Sprintf("network error (%v), retrying in %s (attempt %d/%d)", err, wait, attempt+1, MaxRetries)
 }
 
 // transientRetryDelay returns the linear backoff (capped at 2s) applied

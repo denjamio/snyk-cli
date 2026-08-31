@@ -3,6 +3,7 @@ package snyk
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,17 @@ import (
 )
 
 func newTestClient(srv *httptest.Server) *Client {
-	return &Client{Token: "t", BaseURL: srv.URL, HTTP: srv.Client()}
+	return &Client{Token: "t", BaseURL: srv.URL, HTTP: srv.Client(), UserAgent: defaultUserAgent}
+}
+
+// kindOf asserts err is the typed *Error and returns its kind.
+func kindOf(t *testing.T, err error) Kind {
+	t.Helper()
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("err = %v, want a typed *Error", err)
+	}
+	return e.Kind
 }
 
 // mustQuery builds a list query with the project scope filled in, failing
@@ -57,9 +68,12 @@ func TestListPaginationAcrossPages(t *testing.T) {
 		}
 	})
 
-	got, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
+	got, truncated, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("a two-page listing must not report truncation")
 	}
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
@@ -85,7 +99,7 @@ func TestListFollowsRelativeNextLink(t *testing.T) {
 		fmt.Fprint(w, `{"data":[],"links":{}}`)
 	})
 
-	got, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
+	got, _, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +155,7 @@ func TestListReportsPaginationProgress(t *testing.T) {
 	var events []string
 	c := newTestClient(srv)
 	c.Progress = func(event string) { events = append(events, event) }
-	if _, err := c.List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"})); err != nil {
+	if _, _, err := c.List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"})); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"page 1: 2 issues", "page 2: 1 issue"}
@@ -189,7 +203,7 @@ func TestClientWithoutProgressIsSilent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"})); err != nil {
+	if _, _, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"})); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -233,6 +247,9 @@ func TestGetFailsAfterExhaustedTransientRetries(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("err = %v", err)
+	}
+	if got := kindOf(t, err); got != KindTransient {
+		t.Fatalf("kind = %q, want %q", got, KindTransient)
 	}
 	if attempts != MaxRetries+1 {
 		t.Fatalf("attempts = %d, want %d", attempts, MaxRetries+1)
@@ -300,9 +317,12 @@ func TestListDecodeError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
+	_, _, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
 	if err == nil || !strings.Contains(err.Error(), "decode list response") {
 		t.Fatalf("err = %v", err)
+	}
+	if got := kindOf(t, err); got != KindDecode {
+		t.Fatalf("kind = %q, want %q", got, KindDecode)
 	}
 }
 
@@ -316,9 +336,14 @@ func TestGetDecodeError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "decode issue response") {
 		t.Fatalf("err = %v", err)
 	}
+	if got := kindOf(t, err); got != KindDecode {
+		t.Fatalf("kind = %q, want %q", got, KindDecode)
+	}
 }
 
-func TestListMaxPagesGuard(t *testing.T) {
+// The MaxPages cap is a safety valve, not a failure: when more pages
+// remain, the issues fetched so far come back with truncated=true.
+func TestListStopsAtMaxPagesAndReportsTruncation(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -326,12 +351,18 @@ func TestListMaxPagesGuard(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
-	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("pagination exceeded %d pages", MaxPages)) {
-		t.Fatalf("err = %v", err)
+	got, truncated, err := newTestClient(srv).List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
+	if err != nil {
+		t.Fatalf("cap must not fail the run: %v", err)
+	}
+	if !truncated {
+		t.Fatal("truncated = false, want true when more pages remain")
 	}
 	if requests != MaxPages {
 		t.Fatalf("requests = %d, want %d", requests, MaxPages)
+	}
+	if len(got) != MaxPages {
+		t.Fatalf("issues = %d, want the %d fetched before the cap", len(got), MaxPages)
 	}
 }
 
@@ -346,6 +377,9 @@ func TestNewClientBaseURL(t *testing.T) {
 	c = NewClient("tok", "http://localhost:1234/")
 	if c.BaseURL != "http://localhost:1234" {
 		t.Errorf("trailing slash not trimmed: %q", c.BaseURL)
+	}
+	if c.UserAgent == "" {
+		t.Error("NewClient must set a default User-Agent")
 	}
 }
 
@@ -363,6 +397,9 @@ func TestGetReturnsAPIError(t *testing.T) {
 	if !strings.Contains(err.Error(), "HTTP 401") || !strings.Contains(err.Error(), "bad token") {
 		t.Fatalf("err = %v", err)
 	}
+	if got := kindOf(t, err); got != KindAuth {
+		t.Fatalf("kind = %q, want %q", got, KindAuth)
+	}
 }
 
 func TestGet429ExhaustsRetries(t *testing.T) {
@@ -377,6 +414,9 @@ func TestGet429ExhaustsRetries(t *testing.T) {
 	_, err := newTestClient(srv).Get(context.Background(), "o", "x")
 	if err == nil || !strings.Contains(err.Error(), "HTTP 429") {
 		t.Fatalf("err = %v", err)
+	}
+	if got := kindOf(t, err); got != KindRateLimit {
+		t.Fatalf("kind = %q, want %q", got, KindRateLimit)
 	}
 	if attempts != MaxRetries+1 {
 		t.Fatalf("attempts = %d, want %d", attempts, MaxRetries+1)
@@ -443,7 +483,7 @@ func TestListContextCanceledFailsFast(t *testing.T) {
 	cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := newTestClient(srv).List(ctx, "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
+		_, _, err := newTestClient(srv).List(ctx, "o", mustQuery(t, ListOptions{ProjectID: "p1"}))
 		done <- err
 	}()
 	select {
@@ -466,7 +506,7 @@ func TestListDoesNotMutateCallerQuery(t *testing.T) {
 	defer srv.Close()
 
 	q := mustQuery(t, ListOptions{ProjectID: "p1"})
-	if _, err := newTestClient(srv).List(context.Background(), "o", q); err != nil {
+	if _, _, err := newTestClient(srv).List(context.Background(), "o", q); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := q["version"]; ok {
@@ -528,5 +568,121 @@ func assertParam(t *testing.T, q url.Values, key, want string) {
 	t.Helper()
 	if got := q.Get(key); got != want {
 		t.Errorf("%s = %q, want %q", key, got, want)
+	}
+}
+
+// flakyTransport fails the first `failures` requests with a transport
+// error, then delegates to base — a stand-in for connection refused/reset.
+type flakyTransport struct {
+	failures int
+	calls    int
+	base     http.RoundTripper
+}
+
+func (t *flakyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.calls++
+	if t.calls <= t.failures {
+		return nil, errors.New("connection reset by peer")
+	}
+	return t.base.RoundTrip(r)
+}
+
+func newFlakyClient(srv *httptest.Server, failures int) (*Client, *flakyTransport) {
+	tr := &flakyTransport{failures: failures, base: http.DefaultTransport}
+	c := newTestClient(srv)
+	c.HTTP.Transport = tr
+	return c, tr
+}
+
+// GET never mutates state, so a transport failure retries like a
+// transient status; a later attempt goes through and the wait is
+// reported as progress.
+func TestGetRetriesOnNetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprint(w, `{"data":{"id":"x","attributes":{"title":"T","type":"code","effective_severity_level":"low","status":"open","ignored":false}}}`)
+	}))
+	defer srv.Close()
+
+	var events []string
+	c, tr := newFlakyClient(srv, 1)
+	c.Progress = func(event string) { events = append(events, event) }
+	raw, err := c.Get(context.Background(), "o", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.calls != 2 {
+		t.Fatalf("calls = %d, want 2 (one retry)", tr.calls)
+	}
+	if raw.ID != "x" {
+		t.Fatalf("id = %q", raw.ID)
+	}
+	if len(events) != 1 || !strings.Contains(events[0], "network error") || !strings.Contains(events[0], "attempt 1/"+fmt.Sprint(MaxRetries)) {
+		t.Errorf("events = %v, want one network retry event", events)
+	}
+}
+
+func TestNetworkErrorExhaustsRetries(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+
+	c, tr := newFlakyClient(srv, 1<<30) // always fail
+	_, err := c.Get(context.Background(), "o", "x")
+	if err == nil || !strings.Contains(err.Error(), "connection reset by peer") {
+		t.Fatalf("err = %v, want the wrapped transport error", err)
+	}
+	if got := kindOf(t, err); got != KindNetwork {
+		t.Fatalf("kind = %q, want %q", got, KindNetwork)
+	}
+	if tr.calls != MaxRetries+1 {
+		t.Fatalf("calls = %d, want %d", tr.calls, MaxRetries+1)
+	}
+}
+
+// A caller-canceled context ends the run on the first transport failure —
+// no retries, no waits.
+func TestNetworkErrorCanceledContextFailsFast(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c, tr := newFlakyClient(srv, 1<<30)
+	_, err := c.Get(ctx, "o", "x")
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("err = %v, want context canceled", err)
+	}
+	if tr.calls != 1 {
+		t.Fatalf("calls = %d, want 1 (no retries after cancel)", tr.calls)
+	}
+}
+
+func TestUserAgentHeaderIsSent(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		if strings.HasSuffix(r.URL.Path, "/issues/x") {
+			fmt.Fprint(w, `{"data":{"id":"x","attributes":{"title":"T","type":"code","effective_severity_level":"low","status":"open","ignored":false}}}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	if _, _, err := c.List(context.Background(), "o", mustQuery(t, ListOptions{ProjectID: "p1"})); err != nil {
+		t.Fatal(err)
+	}
+	if got != "snyk-cli" {
+		t.Errorf("default User-Agent = %q, want snyk-cli", got)
+	}
+
+	c.UserAgent = "snyk-cli/v9.9.9"
+	if _, err := c.Get(context.Background(), "o", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if got != "snyk-cli/v9.9.9" {
+		t.Errorf("overridden User-Agent = %q, want snyk-cli/v9.9.9", got)
 	}
 }

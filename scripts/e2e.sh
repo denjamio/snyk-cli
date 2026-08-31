@@ -31,7 +31,8 @@ echo "$out" | grep -q '"total_issues": 4' || fail "expected 4 issues by default 
 echo "$out" | grep -q '"id": "d"' || fail "low issue missing from default output"
 ! echo "$out" | grep -q 'severity=' || fail "summary should not show severity when unfiltered"
 echo "$out" | grep -q 'type=code' || fail "summary must always show type=code"
-! echo "$out" | grep -q '"type": "A issue"' || fail "group payload must not carry the display name"
+echo "$out" | grep -q '"title": "A issue"' || fail "group payload must carry the rule title"
+echo "$out" | grep -q '"truncated": false' || fail "list payload must always carry the truncated flag"
 echo "$out" | grep -q '"id": "a-issue"' || fail "group id missing"
 
 ia=$(printf '%s' "$out" | grep -bo '"id": "a"' | head -1 | cut -d: -f1)

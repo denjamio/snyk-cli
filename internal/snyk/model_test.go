@@ -300,8 +300,8 @@ func TestGroupByTypeOrdersGroupsAlphabeticallyByName(t *testing.T) {
 		t.Fatalf("groups = %d, want %d", len(groups), len(want))
 	}
 	for i, name := range want {
-		if groups[i].Type != name {
-			t.Fatalf("group %d = %q, want %q (all: %+v)", i, groups[i].Type, name, groups)
+		if groups[i].Title != name {
+			t.Fatalf("group %d = %q, want %q (all: %+v)", i, groups[i].Title, name, groups)
 		}
 	}
 	if groups[0].Severity != "low" {
@@ -363,17 +363,46 @@ func TestGroupByTypeSuffixesEveryCollisionUniquely(t *testing.T) {
 	}
 }
 
-func TestGroupPayloadOmitsDisplayName(t *testing.T) {
+func TestGroupPayloadCarriesTitle(t *testing.T) {
 	groups := GroupByType([]Issue{{ID: "i1", Title: "SQL Injection", Severity: "high"}})
 	out, err := json.Marshal(groups[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), `"type"`) {
-		t.Errorf("payload must not carry the display name: %s", out)
+	if !strings.Contains(string(out), `"title":"SQL Injection"`) {
+		t.Errorf("payload must carry the display title so --quiet stays self-contained: %s", out)
 	}
 	if !strings.Contains(string(out), `"id":"sql-injection"`) {
 		t.Errorf("payload must carry the normalized id: %s", out)
+	}
+}
+
+// Group payloads are closed too: an empty severity stays in the JSON
+// instead of being omitted.
+func TestGroupPayloadIsClosed(t *testing.T) {
+	groups := GroupByType([]Issue{{ID: "i1", Title: "T", Severity: ""}})
+	out, err := json.Marshal(groups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"id", "title", "severity", "issues"} {
+		if !strings.Contains(string(out), `"`+key+`":`) {
+			t.Errorf("closed group missing key %q: %s", key, out)
+		}
+	}
+	if !strings.Contains(string(out), `"severity":""`) {
+		t.Errorf("empty severity must serialize as \"\", not be omitted: %s", out)
+	}
+}
+
+// Location payloads are closed: zero values stay in the JSON as "", 0.
+func TestLocationPayloadIsClosed(t *testing.T) {
+	out, err := json.Marshal(Location{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"file":"","start_line":0,"commit_id":""}`; string(out) != want {
+		t.Errorf("location = %s, want %s", out, want)
 	}
 }
 
@@ -419,11 +448,11 @@ func TestGroupByTypeIsDeterministicOnFullTie(t *testing.T) {
 	first := GroupByType(build([]string{"z", "a", "m"}))
 	second := GroupByType(build([]string{"m", "a", "z"}))
 	for i := range first {
-		if first[i].Type != second[i].Type {
-			t.Fatalf("group order differs at %d: %s vs %s", i, first[i].Type, second[i].Type)
+		if first[i].Title != second[i].Title {
+			t.Fatalf("group order differs at %d: %s vs %s", i, first[i].Title, second[i].Title)
 		}
 	}
-	if first[0].Type != "a rule" || first[1].Type != "m rule" || first[2].Type != "z rule" {
+	if first[0].Title != "a rule" || first[1].Title != "m rule" || first[2].Title != "z rule" {
 		t.Fatalf("groups not sorted by name on tie: %+v", first)
 	}
 }
@@ -437,7 +466,7 @@ func TestGroupByTypeFallsBackToTitleAndMergesSameRule(t *testing.T) {
 		t.Fatalf("groups = %d, want 1 (same title merges)", len(groups))
 	}
 	g := groups[0]
-	if g.Type != "SQL Injection" || g.ID != "sql-injection" || g.Severity != "high" || len(g.Issues) != 2 {
+	if g.Title != "SQL Injection" || g.ID != "sql-injection" || g.Severity != "high" || len(g.Issues) != 2 {
 		t.Fatalf("group = %+v", g)
 	}
 }

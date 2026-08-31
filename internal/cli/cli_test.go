@@ -20,6 +20,7 @@ import (
 
 	embedded "github.com/denjamio/snyk-cli"
 	"github.com/denjamio/snyk-cli/internal/output"
+	"github.com/denjamio/snyk-cli/internal/snyk"
 )
 
 func newStreams() (Streams, *bytes.Buffer, *bytes.Buffer) {
@@ -154,7 +155,7 @@ func TestUsageErrorEnvelopeWhenPiped(t *testing.T) {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
-	if env.OK || env.Command != "bogus" || !strings.Contains(env.Error, "unknown command") {
+	if env.Error == nil || env.Error.Kind != kindUsage || !strings.Contains(env.Error.Message, "unknown command") {
 		t.Fatalf("envelope = %+v", env)
 	}
 	if !strings.Contains(errOut.String(), "unknown command") {
@@ -170,7 +171,7 @@ func TestUsageErrorEnvelopeWithJSONOnTTY(t *testing.T) {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
-	if env.OK || env.Command != "issues list" || !strings.Contains(env.Error, "--org is required") {
+	if env.Error == nil || env.Error.Kind != kindUsage || !strings.Contains(env.Error.Message, "--org is required") {
 		t.Fatalf("envelope = %+v", env)
 	}
 }
@@ -182,7 +183,7 @@ func TestUsageErrorEnvelopeWithQuietWhenPiped(t *testing.T) {
 		t.Fatalf("rc = %d, want 2", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
-	if env.OK || env.Command != "issues get" || !strings.Contains(env.Error, "ISSUE_ID") {
+	if env.Error == nil || env.Error.Kind != kindUsage || !strings.Contains(env.Error.Message, "ISSUE_ID") {
 		t.Fatalf("envelope = %+v", env)
 	}
 }
@@ -237,7 +238,7 @@ func TestListNoTokenStructuredErrorWhenPiped(t *testing.T) {
 		t.Fatalf("rc = %d, want 1", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
-	if env.OK || env.Command != "issues list" || !strings.Contains(env.Error, "SNYK_TOKEN not set") {
+	if env.Error == nil || env.Error.Kind != kindConfig || !strings.Contains(env.Error.Message, "SNYK_TOKEN not set") {
 		t.Fatalf("envelope = %+v", env)
 	}
 }
@@ -259,6 +260,46 @@ func TestListNoTokenPlainErrorOnTTY(t *testing.T) {
 	}
 }
 
+// The envelope's error.kind classifies the failure so machine consumers
+// branch on it instead of matching message strings: auth, not_found, api
+// and rate_limit map from HTTP statuses; canceled comes from the context.
+func TestErrorKindInEnvelope(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		kind   string
+	}{
+		{"unauthorized", http.StatusUnauthorized, "auth"},
+		{"forbidden", http.StatusForbidden, "auth"},
+		{"missing issue", http.StatusNotFound, "not_found"},
+		{"other api status", http.StatusInternalServerError, "api"},
+		{"rate limit exhausted", http.StatusTooManyRequests, "rate_limit"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/vnd.api+json")
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(c.status)
+				fmt.Fprint(w, `{"errors":[{"detail":"boom"}]}`)
+			}))
+			defer srv.Close()
+			clearScopeEnv(t)
+			t.Setenv("SNYK_TOKEN", "t")
+			t.Setenv("SNYK_API_URL", srv.URL)
+
+			s, out, _ := newStreams()
+			if rc := Run(context.Background(), []string{"issues", "get", "x", "--org", "o", "--json"}, s); rc != 1 {
+				t.Fatalf("rc = %d, want 1", rc)
+			}
+			env := decodeEnvelope(t, out.Bytes())
+			if env.Error == nil || env.Error.Kind != c.kind || !strings.Contains(env.Error.Message, "boom") {
+				t.Fatalf("envelope = %+v, want kind %q", env, c.kind)
+			}
+		})
+	}
+}
+
 func TestGetParsesFlagsAfterPositional(t *testing.T) {
 	t.Setenv("SNYK_TOKEN", "")
 	s, out, _ := newStreams()
@@ -267,7 +308,7 @@ func TestGetParsesFlagsAfterPositional(t *testing.T) {
 		t.Fatalf("rc = %d, want 1 (token error, not usage error)", rc)
 	}
 	env := decodeEnvelope(t, out.Bytes())
-	if !strings.Contains(env.Error, "SNYK_TOKEN not set") {
+	if env.Error == nil || !strings.Contains(env.Error.Message, "SNYK_TOKEN not set") {
 		t.Fatalf("expected runtime token error proving --org parsed, got %+v", env)
 	}
 }
@@ -460,10 +501,63 @@ func TestGetSuccessReturnsNormalizedDetail(t *testing.T) {
 	}
 }
 
+// A listing that hits the page cap still succeeds: the payload flags the
+// truncation and the warning reaches stderr even on piped runs — the only
+// stderr output a piped consumer ever gets.
+func TestListTruncationFlagsPayloadAndWarnsOnStderr(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		fmt.Fprintf(w, `{"data":[{"id":"i%d"}],"links":{"next":"/rest/orgs/o/issues?p=%d"}}`, requests, requests)
+	}))
+	defer srv.Close()
+	clearScopeEnv(t)
+	t.Setenv("SNYK_TOKEN", "t")
+	t.Setenv("SNYK_API_URL", srv.URL)
+
+	s, out, errOut := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d, want 0 (the cap must not fail the run)", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if !env.OK || !strings.Contains(env.Summary, "truncated=true") {
+		t.Fatalf("envelope = %+v, want truncated=true in the summary", env)
+	}
+	data, _ := json.Marshal(env.Data)
+	var ld struct {
+		TotalIssues int  `json:"total_issues"`
+		Truncated   bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(data, &ld); err != nil {
+		t.Fatal(err)
+	}
+	if ld.TotalIssues != snyk.MaxPages || !ld.Truncated {
+		t.Errorf("data = %s, want total %d (one issue per page, capped) and truncated true", data, snyk.MaxPages)
+	}
+	if !strings.Contains(errOut.String(), "listing truncated") || !strings.Contains(errOut.String(), "--severity") {
+		t.Errorf("stderr = %q, want the truncation warning with a narrowing hint", errOut.String())
+	}
+}
+
+func TestListTruncationNotFlaggedOnNormalRuns(t *testing.T) {
+	startMockSnyk(t)
+	s, out, errOut := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "list", "--org", "o", "--project", "p1", "--json"}, s); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if strings.Contains(out.String(), `"truncated": true`) || strings.Contains(errOut.String(), "truncated") {
+		t.Errorf("normal run must not flag truncation:\nstdout: %s\nstderr: %s", out.String(), errOut.String())
+	}
+}
+
 func TestFlagHelpExitsCleanly(t *testing.T) {
 	for _, args := range [][]string{
 		{"issues", "list", "-h"},
 		{"issues", "get", "--help"},
+		// -h is boolean for the pre-parser: the following flag must
+		// survive instead of being swallowed as a value.
+		{"issues", "list", "-h", "--json"},
 	} {
 		s, _, _ := newStreams()
 		if rc := Run(context.Background(), args, s); rc != 0 {
@@ -500,6 +594,50 @@ func TestSkillRejectsUnknownPositional(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "only the optional action") {
 		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+func TestSkillRejectsRepeatedInstall(t *testing.T) {
+	s, _, errOut := newStreams()
+	if rc := Run(context.Background(), []string{"skill", "install", "install"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2 for repeated install positional", rc)
+	}
+	if !strings.Contains(errOut.String(), "at most one positional") {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// The flag package accepts single-dash spellings, so `-json` is a real
+// JSON request: usage errors must reach the caller as structured
+// envelopes for it too — on a TTY, where plain output is the default —
+// while an explicit =false opts back out.
+func TestUsageErrorEnvelopeSpellingAndOptOut(t *testing.T) {
+	s, out, _ := newStreams()
+	if rc := Run(context.Background(), []string{"issues", "get", "-json"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	env := decodeEnvelope(t, out.Bytes())
+	if env.Error == nil || env.Error.Kind != kindUsage || !strings.Contains(env.Error.Message, "ISSUE_ID") {
+		t.Fatalf("envelope = %+v, want structured error for -json", env)
+	}
+
+	s, out, _ = newStreams()
+	s.OutIsTTY = true
+	if rc := Run(context.Background(), []string{"issues", "get", "-json"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	env = decodeEnvelope(t, out.Bytes())
+	if env.Error == nil || env.Error.Kind != kindUsage || !strings.Contains(env.Error.Message, "ISSUE_ID") {
+		t.Fatalf("envelope = %+v, want structured envelope on TTY for -json", env)
+	}
+
+	s, out, _ = newStreams()
+	s.OutIsTTY = true
+	if rc := Run(context.Background(), []string{"issues", "get", "--json=false"}, s); rc != 2 {
+		t.Fatalf("rc = %d, want 2", rc)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want no envelope for explicit --json=false", out.String())
 	}
 }
 
@@ -585,16 +723,18 @@ func TestSummarizeReflectsEffectiveFilters(t *testing.T) {
 		includeIgnored bool
 		severity       string
 		createdAfter   string
+		truncated      bool
 		want           string
 	}{
-		{0, "", false, "", "", "0 issues · status=open · ignored=false · type=code"},
-		{7, "open,resolved", true, "", "", "7 issues · status=open,resolved · ignored=any · type=code"},
-		{5, "", false, "low", "", "5 issues · status=open · ignored=false · type=code · severity=low"},
-		{2, "", false, "", "2026-08-01T00:00:00Z", "2 issues · status=open · ignored=false · type=code · created_after=2026-08-01T00:00:00Z"},
+		{0, "", false, "", "", false, "0 issues · status=open · ignored=false · type=code"},
+		{7, "open,resolved", true, "", "", false, "7 issues · status=open,resolved · ignored=any · type=code"},
+		{5, "", false, "low", "", false, "5 issues · status=open · ignored=false · type=code · severity=low"},
+		{2, "", false, "", "2026-08-01T00:00:00Z", false, "2 issues · status=open · ignored=false · type=code · created_after=2026-08-01T00:00:00Z"},
+		{3, "", false, "", "", true, "3 issues · status=open · ignored=false · type=code · truncated=true"},
 	}
 	for _, c := range cases {
-		if got := summarize(c.n, c.status, c.includeIgnored, c.severity, c.createdAfter); got != c.want {
-			t.Errorf("summarize(%d,%q,%v,%q,%q) = %q, want %q", c.n, c.status, c.includeIgnored, c.severity, c.createdAfter, got, c.want)
+		if got := summarize(c.n, c.status, c.includeIgnored, c.severity, c.createdAfter, c.truncated); got != c.want {
+			t.Errorf("summarize(%d,%q,%v,%q,%q,%v) = %q, want %q", c.n, c.status, c.includeIgnored, c.severity, c.createdAfter, c.truncated, got, c.want)
 		}
 	}
 }
@@ -722,11 +862,13 @@ func TestListSeveritySentToAPIOnlyWhenRequested(t *testing.T) {
 
 func TestListDefaultsToCodeFilter(t *testing.T) {
 	var gotQuery url.Values
+	var gotUA string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/vnd.api+json")
 		fmt.Fprint(w, `{"data":[],"links":{}}`)
 		if r.URL.Path == "/rest/orgs/o/issues" && gotQuery == nil {
 			gotQuery = r.URL.Query()
+			gotUA = r.Header.Get("User-Agent")
 		}
 	}))
 	defer srv.Close()
@@ -752,6 +894,9 @@ func TestListDefaultsToCodeFilter(t *testing.T) {
 	}
 	if gotQuery.Has("effective_severity_level") {
 		t.Errorf("severity param present by default: %q", gotQuery.Get("effective_severity_level"))
+	}
+	if want := "snyk-cli/" + Version; gotUA != want {
+		t.Errorf("User-Agent = %q, want %q (versioned)", gotUA, want)
 	}
 }
 
@@ -1002,8 +1147,9 @@ func TestRunContextCanceledPropagatesToClient(t *testing.T) {
 		if rc != 1 {
 			t.Fatalf("rc = %d, want 1 on canceled context", rc)
 		}
-		if !strings.Contains(out.String(), "context canceled") {
-			t.Errorf("out = %q, want context canceled error", out.String())
+		env := decodeEnvelope(t, out.Bytes())
+		if env.Error == nil || env.Error.Kind != kindCanceled || !strings.Contains(env.Error.Message, "context canceled") {
+			t.Fatalf("envelope = %+v, want kind %q with the context error", env, kindCanceled)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return on canceled context")

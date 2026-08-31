@@ -55,11 +55,17 @@ fetch binaries yourself.
   evidence with `--include-code-flows` (heavier payload).
 - Credentials come exclusively from the `SNYK_TOKEN` environment variable:
   never echo, store or persist it anywhere.
-- Pagination, retries (429/5xx) and API-version pinning are handled inside
-  the binary. Do not paginate manually or re-run in a retry loop; an
-  exit 1 means retries were exhausted or the request was invalid.
+- Pagination, retries (429/5xx and network-level errors) and API-version
+  pinning are handled inside the binary. Do not paginate manually or
+  re-run in a retry loop; an exit 1 means retries were exhausted or the
+  request was invalid.
+- A listing is capped at 10,000 issues (100 pages). If the cap trips the
+  run still exits 0, with `"truncated": true` in `data` and a warning on
+  stderr; narrow with `--severity`/`--created-after` and re-run for the
+  rest instead of assuming the result is complete.
 - Progress lines (pages fetched, retries) may appear on stderr in
-  interactive terminals; piped `--json` runs are silent. Parse stdout
+  interactive terminals; piped `--json` runs are silent — the only
+  stderr output they ever get is the truncation warning. Parse stdout
   only.
 - Use `--quiet` only when the bare groups array is needed for scripting.
 
@@ -71,8 +77,9 @@ fetch binaries yourself.
 
 Each group represents one vulnerability type and carries `id` (a
 deterministic slug of the type name — the natural key for matching
-tickets), `severity` (worst in the group) and `issues`; the display name is
-each issue's `title`. Issue fields: `id` (stable identity), `key`, `title`,
+tickets), `title` (the rule name shared by every issue in the group),
+`severity` (worst in the group) and `issues`. Issue fields: `id` (stable
+identity), `key`, `title`,
 `issue_type`, `severity`, `status`, `ignored`, `org_id`, `project_id`,
 timestamps, `description`, `remediation` (`manual_steps`), `risk_score`,
 `location`, `locations`, `cwes`, plus code-triage signals: `introduced_at`
@@ -112,21 +119,24 @@ snyk issues list --org "$SNYK_ORG_ID" --project "$SNYK_PROJECT_ID" \
 Exit codes decide the next action:
 
 - `0` → success: parse `data`.
-- `1` → runtime/API error: read the envelope `error` (or stderr) and
-  surface it to the user. Transient HTTP 429/5xx were already retried
-  internally; do not retry blindly.
-- `2` → usage error: read the envelope `error` on stdout (the usage text
-  goes to stderr), fix the invocation (unknown flag value, missing
-  org/project) and retry.
+- `1` → runtime/API error: read the envelope `error` and surface it to
+  the user. Transient HTTP 429/5xx were already retried internally; do
+  not retry blindly. `error.kind` classifies the failure (`config`,
+  `auth`, `not_found`, `rate_limit`, `transient`, `network`, `canceled`,
+  `api`, `decode`, `internal`) — branch on it instead of matching the
+  message.
+- `2` → usage error (`error.kind` is `usage`): read the envelope `error`
+  on stdout (the usage text goes to stderr), fix the invocation (unknown
+  flag value, missing org/project) and retry.
 
 Common issues:
 
-- `SNYK_TOKEN not set` → ask the user to export `SNYK_TOKEN` before
-  retrying.
+- kind `config`, message `SNYK_TOKEN not set` → ask the user to export
+  `SNYK_TOKEN` before retrying.
 - `--org is required (or set SNYK_ORG_ID)` / `--project is required (or
   set SNYK_PROJECT_ID)` → resolve the ID from context or ask the user;
   retry with the flag or the env var.
 - `command not found` → the CLI is not installed; ask the user to install
   it (one-line installers in the repository README).
-- HTTP 404 on `issues get` → the `ISSUE_ID` is wrong or does not belong to
-  this org; re-check the id instead of retrying.
+- kind `not_found` on `issues get` → the `ISSUE_ID` is wrong or does not
+  belong to this org; re-check the id instead of retrying.

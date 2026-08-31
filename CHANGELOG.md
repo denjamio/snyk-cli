@@ -8,6 +8,20 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Changed
 
+- The failure envelope's `error` is now an object
+  `{"kind": "...", "message": "..."}` instead of a plain string: scripts
+  and agents branch on `kind` (`usage`, `config`, `auth`, `not_found`,
+  `rate_limit`, `transient`, `network`, `canceled`, `api`, `decode`,
+  `internal`) instead of matching message strings. Breaking for
+  consumers that parsed `error` as a string.
+- The 100-page listing cap no longer fails the run: the issues fetched so
+  far are returned with `"truncated": true` in the payload,
+  `truncated=true` appended to the summary, and a warning on stderr —
+  even on piped runs, the only stderr output they ever get. Narrow with
+  `--severity`/`--created-after` to fetch the rest.
+- `issues list` groups carry their `title` (the rule name shared by every
+  issue in the group), so `--quiet` consumers no longer have to recover
+  the display name from the issues themselves.
 - Usage errors (exit 2) also emit a structured `{"ok":false}` envelope on
   stdout when piped or when `--json`/`--quiet` was requested — the same
   contract as runtime errors — so agents and scripts parse every failure
@@ -30,6 +44,11 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- Transient retries now also cover network-level failures (connection
+  refused or reset, timeouts, TLS handshake), not just HTTP 429/5xx
+  statuses; the progress line names the transport error.
+- Every API request carries a `User-Agent: snyk-cli/<version>` header
+  (default `snyk-cli` for library users).
 - Progress reporting for humans: fetched pages and retry waits are logged
   to stderr — only when it is a terminal. Piped and `--json` runs (agents,
   scripts) stay silent, keeping their stdout payload the whole story.
@@ -40,6 +59,17 @@ versioning follows [SemVer](https://semver.org/).
 
 ### Fixed
 
+- The closed-payload guarantee now holds at leaf level too:
+  `location`/`locations` entries always carry `file`, `start_line` and
+  `commit_id`, and a group with no severity still serializes
+  `"severity": ""` instead of omitting the key.
+- `-h` is boolean for the argument pre-parser, so it no longer swallows a
+  following flag token (e.g. `snyk issues list -h --json`).
+- Usage errors emit the structured envelope for single-dash `-json`/
+  `-quiet` spellings too (the flag package accepts them), while an
+  explicit `--json=false` opts out.
+- `snyk skill` rejects repeated `install` positionals instead of
+  silently accepting them.
 - API error snippets never end in a malformed UTF-8 sequence after the
   300-byte cut.
 - TTY detection probes the terminal (ioctl/console query) instead of the

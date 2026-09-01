@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-01
 
 ### Changed
 
@@ -23,7 +23,6 @@ versioning follows [SemVer](https://semver.org/).
   cap over the per-request `SNYK_HTTP_TIMEOUT` and the retry budget.
 - Human table rendering propagates write failures as a runtime error
   (exit 1) — a half-written table no longer passes for success.
-
 - Retry waits share a cumulative per-request budget (default 2 minutes,
   `429` `Retry-After` waits included): when the next wait would exceed
   it, the request fails fast with the matching `error.kind`
@@ -72,8 +71,6 @@ versioning follows [SemVer](https://semver.org/).
 - The API base URL (`SNYK_API_URL`) is resolved in the CLI layer and
   injected into the client; the client package no longer reads the
   environment.
-- The human usage text is generated from the command catalog that also
-  backs `help --json`, so the two help surfaces cannot drift apart.
 
 ### Added
 
